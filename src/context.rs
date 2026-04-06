@@ -428,11 +428,14 @@ impl<'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx> {
         );
 
         // Register main in open_functions so codegen can generate its body.
-        // The real params will be argc (int) and argv (void*) but codegen_ssa
-        // handles parameter setup via get_param/store_fn_arg.
+        // Use the standard C main signature: int main(int, char **).
+        // Clang enforces this strictly.
         let i32_ty = self.type_i32();
         let params = vec![(i32_ty, "_arg0".into()), (ptr_ty, "_arg1".into())];
-        let func_def = crate::module::CModule::new_function_def("main".into(), ret_ty, params);
+        let mut func_def = crate::module::CModule::new_function_def("main".into(), ret_ty, params);
+        func_def
+            .param_type_overrides
+            .insert(1, "char **".to_string());
         self.module
             .borrow_mut()
             .open_functions

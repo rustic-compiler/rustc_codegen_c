@@ -124,8 +124,13 @@ impl ValueStore {
             CValueKind::Param { index } => format!("_arg{index}"),
             CValueKind::Temp { id } => format!("_t{id}"),
             CValueKind::IntConst(i) => {
-                if *i >= i64::MIN as i128 && *i <= i64::MAX as i128 {
+                if *i > i64::MIN as i128 && *i <= i64::MAX as i128 {
+                    // Fits in long long. Excludes i64::MIN because the
+                    // literal 9223372036854775808LL overflows long long in
+                    // clang (the minus sign is applied after parsing).
                     format!("{i}LL")
+                } else if *i == i64::MIN as i128 {
+                    "(-9223372036854775807LL - 1LL)".to_string()
                 } else {
                     // Split into hi/lo 64-bit parts for 128-bit values
                     let bits = *i as u128;
@@ -154,7 +159,7 @@ impl ValueStore {
                 }
             }
             CValueKind::BoolConst(b) => if *b { "1" } else { "0" }.into(),
-            CValueKind::NullPtr => "NULL".into(),
+            CValueKind::NullPtr => "0".into(),
             CValueKind::Undef | CValueKind::Poison => "0 /* undef */".into(),
             CValueKind::Global { name } => name.clone(),
             CValueKind::Function { name, .. } => name.clone(),

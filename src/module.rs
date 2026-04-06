@@ -44,6 +44,10 @@ pub struct FunctionDef {
     pub retbuf_name: Option<String>,
     /// Counter for unique invoke context variable names.
     pub invoke_counter: u32,
+    /// Override the C type string for specific parameters (by index).
+    /// Used for `main(int, char **)` where the second param must be
+    /// `char **` rather than the generic `void *`.
+    pub param_type_overrides: BTreeMap<usize, String>,
 }
 
 impl FunctionDef {
@@ -60,6 +64,7 @@ impl FunctionDef {
             ret_data_type: None,
             retbuf_name: None,
             invoke_counter: 0,
+            param_type_overrides: BTreeMap::new(),
         }
     }
 
@@ -101,7 +106,14 @@ impl FunctionDef {
         let params_str: Vec<_> = self
             .params
             .iter()
-            .map(|(ty, name)| types.render_decl(*ty, name))
+            .enumerate()
+            .map(|(i, (ty, name))| {
+                if let Some(override_ty) = self.param_type_overrides.get(&i) {
+                    format!("{override_ty} {name}")
+                } else {
+                    types.render_decl(*ty, name)
+                }
+            })
             .collect();
         let params_joined = if params_str.is_empty() {
             "void".to_string()
@@ -256,6 +268,7 @@ impl CModule {
         s.push_str("void *memcpy(void *, const void *, size_t);\n");
         s.push_str("void *memset(void *, int, size_t);\n");
         s.push_str("void *memmove(void *, const void *, size_t);\n");
+        s.push_str("int memcmp(const void *, const void *, size_t);\n");
         s.push_str("void abort(void);\n");
         s.push_str("int __rust_try(void (*)(void *), void *, void (*)(void *, void *));\n");
         // setjmp/longjmp-based unwind context for invoke/resume/catch_unwind.
@@ -287,12 +300,27 @@ impl CModule {
         s.push_str("#error \"128-bit integer support requires __int128 (GCC/Clang)\"\n");
         s.push_str("#endif\n\n");
 
-        // _Float16 / __float128 portability
+        // _Float16 / __float128 portability.
+        // Clang may support these as builtin types without defining the
+        // corresponding __FLT*_MAX__ macros. Use __is_identifier() (a
+        // clang builtin) to check whether the name is already a keyword.
         s.push_str("#ifndef __FLT16_MAX__\n");
+        s.push_str("#ifdef __clang__\n");
+        s.push_str("#if __is_identifier(_Float16)\n");
         s.push_str("typedef unsigned short _Float16; /* fallback: no hardware f16 */\n");
         s.push_str("#endif\n");
+        s.push_str("#else\n");
+        s.push_str("typedef unsigned short _Float16; /* fallback: no hardware f16 */\n");
+        s.push_str("#endif\n");
+        s.push_str("#endif\n");
         s.push_str("#ifndef __FLT128_MAX__\n");
+        s.push_str("#ifdef __clang__\n");
+        s.push_str("#if __is_identifier(__float128)\n");
         s.push_str("typedef long double __float128; /* fallback: reduced precision */\n");
+        s.push_str("#endif\n");
+        s.push_str("#else\n");
+        s.push_str("typedef long double __float128; /* fallback: reduced precision */\n");
+        s.push_str("#endif\n");
         s.push_str("#endif\n\n");
 
         // MSVC-compatible fallbacks for GCC/Clang builtins

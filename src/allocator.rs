@@ -33,7 +33,7 @@ pub(crate) fn codegen(
             "realloc" => format!(
                 "void *{name}(void *ptr, size_t old_size, size_t align, size_t new_size) {{\n  \
                      void *new_ptr = __rustc_aligned_alloc(new_size, align);\n  \
-                     if (!new_ptr) return NULL;\n  \
+                     if (!new_ptr) return (void *)0;\n  \
                      memcpy(new_ptr, ptr, old_size < new_size ? old_size : new_size);\n  \
                      __rustc_aligned_free(ptr);\n  \
                      return new_ptr;\n\
@@ -74,14 +74,24 @@ pub(crate) fn codegen(
 
 /// Emit portable aligned allocation helpers.
 fn emit_aligned_alloc_helpers(module: &mut CModule) {
+    // Forward-declare libc functions used below. We avoid including
+    // <stdlib.h> because its full declarations can conflict with
+    // signatures in the generated code.
     module.function_defs.push(
-        "static void *__rustc_aligned_alloc(size_t size, size_t align) {\n\
+        "#if defined(_WIN32)\n\
+         void *_aligned_malloc(size_t, size_t);\n\
+         void _aligned_free(void *);\n\
+         #else\n\
+         void free(void *);\n\
+         int posix_memalign(void **, size_t, size_t);\n\
+         #endif\n\
+         static void *__rustc_aligned_alloc(size_t size, size_t align) {\n\
          #if defined(_WIN32)\n  \
              return _aligned_malloc(size, align);\n\
          #else\n  \
              if (align < sizeof(void *)) align = sizeof(void *);\n  \
              void *ptr;\n  \
-             if (posix_memalign(&ptr, align, size) != 0) return NULL;\n  \
+             if (posix_memalign(&ptr, align, size) != 0) return (void *)0;\n  \
              return ptr;\n\
          #endif\n\
          }\n\

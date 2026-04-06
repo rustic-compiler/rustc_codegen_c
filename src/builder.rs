@@ -363,7 +363,14 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         self.emit(format!("switch ({cast_expr}) {{"));
         for (constant, bb) in cases {
             let label = self.block_label(bb);
-            self.emit(format!("  case {constant}ULL: goto {label};"));
+            let constant_str = if constant > u64::MAX as u128 {
+                let hi = (constant >> 64) as u64;
+                let lo = constant as u64;
+                format!("((uint128_t){hi}ULL << 64 | {lo}ULL)")
+            } else {
+                format!("{constant}ULL")
+            };
+            self.emit(format!("  case {constant_str}: goto {label};"));
         }
         self.emit(format!("  default: goto {else_label};"));
         self.emit("}".into());

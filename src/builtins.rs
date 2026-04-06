@@ -12,7 +12,9 @@ use crate::module::CModule;
 /// __sync builtins. The generated C is guarded by `#ifdef __aarch64__` so
 /// it compiles correctly on any target architecture.
 pub(crate) fn emit_aarch64_outline_atomics(module: &mut CModule) {
-    module.function_defs.push("#ifdef __aarch64__\n".to_string());
+    module
+        .function_defs
+        .push("#ifdef __aarch64__\n".to_string());
 
     // CAS: __aarch64_cas{1,2,4,8,16}_{relax,acq,rel,acq_rel}
     for size in &[1u32, 2, 4, 8] {
