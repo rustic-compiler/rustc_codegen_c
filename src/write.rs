@@ -57,11 +57,10 @@ pub(crate) fn codegen(
         cmd.arg("-fPIC");
     }
 
-    // aarch64: disable outline-atomics -- the C compiler's outline-atomics
-    // would call into compiler_builtins functions that we compiled without
-    // inline assembly support.  Use inline LDXR/STXR instead.
-    #[cfg(target_arch = "aarch64")]
-    cmd.arg("-mno-outline-atomics");
+    // No -mno-outline-atomics: we provide weak implementations of the
+    // __aarch64_* outline-atomics symbols (guarded by #ifdef __aarch64__
+    // in the generated C), so the C compiler can use outline atomics
+    // freely on aarch64 targets.
 
     // Add optimization level.
     // TODO: temporarily forced to -O1 for faster iteration.

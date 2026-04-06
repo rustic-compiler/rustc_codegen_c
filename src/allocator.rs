@@ -66,8 +66,7 @@ pub(crate) fn codegen(
     emit_unwind_infrastructure(module);
     emit_rust_try(module);
 
-    // Platform-specific builtins
-    #[cfg(target_arch = "aarch64")]
+    // Architecture-specific builtins (guarded by C preprocessor in output)
     crate::builtins::emit_aarch64_outline_atomics(module);
 
     crate::builtins::emit_int128_division(module);

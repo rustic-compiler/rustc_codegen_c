@@ -259,14 +259,12 @@ impl CModule {
         s.push_str("void abort(void);\n");
         s.push_str("int __rust_try(void (*)(void *), void *, void (*)(void *, void *));\n");
         // setjmp/longjmp-based unwind context for invoke/resume/catch_unwind.
-        // Uses a custom lightweight setjmp/longjmp pair that saves only
-        // the callee-saved registers (176 bytes) instead of the full
-        // libc jmp_buf (~308 bytes which includes signal mask storage).
-        s.push_str("typedef long long __rustc_jmp_buf[22];\n");
-        s.push_str("int __rustc_setjmp(__rustc_jmp_buf) __attribute__((returns_twice));\n");
-        s.push_str("void __rustc_longjmp(__rustc_jmp_buf, int) __attribute__((noreturn));\n");
+        // Uses standard C setjmp/longjmp for full architecture portability.
+        s.push_str("#include <setjmp.h>\n");
+        s.push_str("#define __rustc_setjmp setjmp\n");
+        s.push_str("#define __rustc_longjmp longjmp\n");
         s.push_str("struct __rustc_unwind_context {\n");
-        s.push_str("  __rustc_jmp_buf buf;\n");
+        s.push_str("  jmp_buf buf;\n");
         s.push_str("  void *exception_ptr;\n");
         s.push_str("  struct __rustc_unwind_context *prev;\n");
         s.push_str("};\n");
@@ -278,55 +276,8 @@ impl CModule {
         // in every module lets the linker merge them into one per link
         // unit.
         s.push_str(
-            "__attribute__((weak)) __thread struct __rustc_unwind_context *__rustc_unwind_chain;\n",
+            "__attribute__((weak)) __thread struct __rustc_unwind_context *__rustc_unwind_chain;\n\n",
         );
-        // Weak definitions of __rustc_setjmp/__rustc_longjmp for the
-        // same reason: the allocator module's .globl definitions become
-        // local in .so files.
-        s.push_str("#ifdef __aarch64__\n");
-        s.push_str(
-            r#"__asm__(
-".weak __rustc_setjmp\n"
-".type __rustc_setjmp, @function\n"
-"__rustc_setjmp:\n"
-"  stp x19, x20, [x0, #0]\n"
-"  stp x21, x22, [x0, #16]\n"
-"  stp x23, x24, [x0, #32]\n"
-"  stp x25, x26, [x0, #48]\n"
-"  stp x27, x28, [x0, #64]\n"
-"  stp x29, x30, [x0, #80]\n"
-"  mov x2, sp\n"
-"  str x2, [x0, #96]\n"
-"  stp d8, d9, [x0, #104]\n"
-"  stp d10, d11, [x0, #120]\n"
-"  stp d12, d13, [x0, #136]\n"
-"  stp d14, d15, [x0, #152]\n"
-"  mov w0, #0\n"
-"  ret\n"
-".size __rustc_setjmp, .-__rustc_setjmp\n"
-"\n"
-".weak __rustc_longjmp\n"
-".type __rustc_longjmp, @function\n"
-"__rustc_longjmp:\n"
-"  ldp x19, x20, [x0, #0]\n"
-"  ldp x21, x22, [x0, #16]\n"
-"  ldp x23, x24, [x0, #32]\n"
-"  ldp x25, x26, [x0, #48]\n"
-"  ldp x27, x28, [x0, #64]\n"
-"  ldp x29, x30, [x0, #80]\n"
-"  ldr x2, [x0, #96]\n"
-"  mov sp, x2\n"
-"  ldp d8, d9, [x0, #104]\n"
-"  ldp d10, d11, [x0, #120]\n"
-"  ldp d12, d13, [x0, #136]\n"
-"  ldp d14, d15, [x0, #152]\n"
-"  mov w0, w1\n"
-"  ret\n"
-".size __rustc_longjmp, .-__rustc_longjmp\n"
-);
-"#,
-        );
-        s.push_str("#endif\n\n");
 
         // 128-bit integer support (GCC/Clang extension)
         s.push_str("#ifdef __SIZEOF_INT128__\n");
