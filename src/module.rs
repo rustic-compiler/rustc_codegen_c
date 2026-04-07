@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use crate::c_ast::{CStmt, PrettyPrinter};
 use crate::types::{TypeRef, TypeStore};
 use crate::values::ValueStore;
 
@@ -16,7 +17,7 @@ pub struct BasicBlockId(pub u32);
 #[derive(Debug)]
 pub struct BasicBlockData {
     pub label: String,
-    pub statements: Vec<String>,
+    pub statements: Vec<CStmt>,
     /// Whether this block has a terminator (return, goto, etc.)
     pub terminated: bool,
 }
@@ -82,7 +83,7 @@ impl FunctionDef {
         BasicBlockId(id)
     }
 
-    pub fn emit(&mut self, bb: BasicBlockId, stmt: String) {
+    pub fn emit(&mut self, bb: BasicBlockId, stmt: CStmt) {
         if let Some(block) = self.blocks.get_mut(&bb.0) {
             block.statements.push(stmt);
         }
@@ -141,9 +142,8 @@ impl FunctionDef {
         // Basic blocks
         for (_, block) in &self.blocks {
             let _ = writeln!(s, "{}:", block.label);
-            for stmt in &block.statements {
-                let _ = writeln!(s, "  {stmt}");
-            }
+            let pp = PrettyPrinter::with_indent(&block.statements, 1);
+            s.push_str(&pp.to_string());
             // If not terminated, fall through (add explicit label comment)
             if !block.terminated {
                 let _ = writeln!(s, "  ; /* fallthrough */");

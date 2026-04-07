@@ -23,6 +23,7 @@ use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
 use rustc_span::Span;
 use rustc_target::callconv::{ArgAbi, FnAbi, PassMode};
 
+use crate::c_ast::{CBinOp, CExpr, CStmt, CUnaryOp};
 use crate::context::{CFunclet, CodegenCx, DebugLoc, DebugScope, DebugVar};
 use crate::module::BasicBlockId;
 use crate::types::{CTypeKind, TypeRef};
@@ -44,7 +45,7 @@ impl<'a, 'tcx> Deref for Builder<'a, 'tcx> {
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Emit a C statement to the current basic block.
-    pub(crate) fn emit(&self, stmt: String) {
+    pub(crate) fn emit(&self, stmt: CStmt) {
         let mut module = self.cx.module.borrow_mut();
         if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
             func.emit(self.current_bb, stmt);
@@ -52,7 +53,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     }
 
     /// Create a new temporary variable and emit its declaration + assignment.
-    pub(crate) fn new_temp_with_stmt(&self, ty: TypeRef, expr: &str) -> ValueRef {
+    pub(crate) fn new_temp_with_stmt(&self, ty: TypeRef, expr: CExpr) -> ValueRef {
         let val = self.cx.new_temp(ty);
         let name = self.cx.render_value(val);
         let decl_str = self.cx.render_type_decl(ty, &name);
@@ -66,23 +67,23 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         }
 
         // Emit assignment
-        self.emit(format!("{name} = {expr};"));
+        self.emit(CStmt::assign(CExpr::var(&name), expr));
         val
     }
 
     /// Emit a binary operation.
-    fn binop(&mut self, op: &str, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
+    fn binop(&mut self, op: CBinOp, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
         let ty = self.cx.values.borrow().get_type(lhs);
         let l = self.cx.render_value(lhs);
         let r = self.cx.render_value(rhs);
-        self.new_temp_with_stmt(ty, &format!("{l} {op} {r}"))
+        self.new_temp_with_stmt(ty, CExpr::binop(CExpr::var(l), op, CExpr::var(r)))
     }
 
     /// Emit a cast operation.
     fn cast(&mut self, val: ValueRef, dest_ty: TypeRef) -> ValueRef {
         let v = self.cx.render_value(val);
         let t = self.cx.render_type(dest_ty);
-        self.new_temp_with_stmt(dest_ty, &format!("({t}){v}"))
+        self.new_temp_with_stmt(dest_ty, CExpr::cast(t, CExpr::var(v)))
     }
 
     /// Get the unsigned variant of an integer type.
@@ -103,14 +104,24 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     }
 
     /// Emit a binary operation with operands cast to unsigned.
-    fn unsigned_binop(&mut self, op: &str, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
+    fn unsigned_binop(&mut self, op: CBinOp, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
         let ty = self.cx.values.borrow().get_type(lhs);
         if let Some(unsigned_ty) = self.unsigned_type(ty) {
             let l = self.cx.render_value(lhs);
             let r = self.cx.render_value(rhs);
             let ut = self.cx.render_type(unsigned_ty);
             let t = self.cx.render_type(ty);
-            self.new_temp_with_stmt(ty, &format!("({t})(({ut}){l} {op} ({ut}){r})"))
+            self.new_temp_with_stmt(
+                ty,
+                CExpr::cast(
+                    t,
+                    CExpr::paren(CExpr::binop(
+                        CExpr::cast(&ut, CExpr::var(l)),
+                        op,
+                        CExpr::cast(ut, CExpr::var(r)),
+                    )),
+                ),
+            )
         } else {
             self.binop(op, lhs, rhs)
         }
@@ -277,9 +288,9 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 .and_then(|f| f.retbuf_name.clone())
         };
         if let Some(name) = retbuf {
-            self.emit(format!("return {name};"));
+            self.emit(CStmt::ret_val(CExpr::var(name)));
         } else {
-            self.emit("return;".into());
+            self.emit(CStmt::ret_void());
         }
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
@@ -301,10 +312,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 .unwrap_or(false)
         };
         if is_void {
-            self.emit("return;".into());
+            self.emit(CStmt::ret_void());
         } else {
             let val = self.cx.render_value(v);
-            self.emit(format!("return {val};"));
+            self.emit(CStmt::ret_val(CExpr::var(val)));
         }
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
@@ -315,7 +326,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
 
     fn br(&mut self, dest: BasicBlockId) {
         let label = self.block_label(dest);
-        self.emit(format!("goto {label};"));
+        self.emit(CStmt::goto(label));
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
         if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
@@ -327,9 +338,11 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let c = self.cx.render_value(cond);
         let then_label = self.block_label(then_llbb);
         let else_label = self.block_label(else_llbb);
-        self.emit(format!(
-            "if ({c}) goto {then_label}; else goto {else_label};"
-        ));
+        self.emit(CStmt::CondGoto {
+            cond: CExpr::var(c),
+            then_label,
+            else_label,
+        });
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
         if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
@@ -352,28 +365,32 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         // doesn't equal 240.
         let val_ty = self.cx.values.borrow().get_type(v);
         let types = self.cx.types.borrow();
-        let cast_expr = match types.get(val_ty) {
+        let switch_expr = match types.get(val_ty) {
             CTypeKind::Int { bits, signed: true } => {
                 let unsigned_ty = format!("uint{bits}_t");
-                format!("({unsigned_ty}){val}")
+                CExpr::cast(unsigned_ty, CExpr::var(val))
             }
-            _ => val,
+            _ => CExpr::var(val),
         };
         drop(types);
-        self.emit(format!("switch ({cast_expr}) {{"));
-        for (constant, bb) in cases {
-            let label = self.block_label(bb);
-            let constant_str = if constant > u64::MAX as u128 {
-                let hi = (constant >> 64) as u64;
-                let lo = constant as u64;
-                format!("((uint128_t){hi}ULL << 64 | {lo}ULL)")
-            } else {
-                format!("{constant}ULL")
-            };
-            self.emit(format!("  case {constant_str}: goto {label};"));
-        }
-        self.emit(format!("  default: goto {else_label};"));
-        self.emit("}".into());
+        let ast_cases: Vec<(CExpr, String)> = cases
+            .map(|(constant, bb)| {
+                let label = self.block_label(bb);
+                let case_expr = if constant > u64::MAX as u128 {
+                    let hi = (constant >> 64) as u64;
+                    let lo = constant as u64;
+                    CExpr::raw(format!("((uint128_t){hi}ULL << 64 | {lo}ULL)"))
+                } else {
+                    CExpr::lit(format!("{constant}ULL"))
+                };
+                (case_expr, label)
+            })
+            .collect();
+        self.emit(CStmt::Switch {
+            expr: switch_expr,
+            cases: ast_cases,
+            default: else_label,
+        });
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
         if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
@@ -416,23 +433,35 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let then_label = self.block_label(then);
 
         // Push context onto chain
-        self.emit("__unwind_ctx.prev = __rustc_unwind_chain;".to_string());
-        self.emit("__unwind_ctx.exception_ptr = (void *)0;".to_string());
-        self.emit("__rustc_unwind_chain = &__unwind_ctx;".to_string());
+        self.emit(CStmt::assign(
+            CExpr::field(CExpr::var("__unwind_ctx"), "prev"),
+            CExpr::var("__rustc_unwind_chain"),
+        ));
+        self.emit(CStmt::assign(
+            CExpr::field(CExpr::var("__unwind_ctx"), "exception_ptr"),
+            CExpr::cast("void *", CExpr::lit("0")),
+        ));
+        self.emit(CStmt::assign(
+            CExpr::var("__rustc_unwind_chain"),
+            CExpr::addr_of(CExpr::var("__unwind_ctx")),
+        ));
         // __builtin_setjmp returns 0 normally; non-zero after __builtin_longjmp
-        self.emit(format!(
+        self.emit(CStmt::raw(format!(
             "if (__rustc_setjmp(__unwind_ctx.buf) != 0) {{ \
                 __exn_ptr = __unwind_ctx.exception_ptr; \
                 __rustc_unwind_chain = __unwind_ctx.prev; \
                 goto {catch_label}; }}"
-        ));
+        )));
 
         // Normal path: call the function
         let result = self.call(llty, None, _fn_abi, llfn, args, None, _instance);
 
         // Pop context and continue to normal successor
-        self.emit("__rustc_unwind_chain = __unwind_ctx.prev;".to_string());
-        self.emit(format!("goto {then_label};"));
+        self.emit(CStmt::assign(
+            CExpr::var("__rustc_unwind_chain"),
+            CExpr::field(CExpr::var("__unwind_ctx"), "prev"),
+        ));
+        self.emit(CStmt::goto(then_label));
 
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
@@ -443,7 +472,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
     }
 
     fn unreachable(&mut self) {
-        self.emit("__builtin_unreachable();".into());
+        self.emit(CStmt::Unreachable);
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
         if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
@@ -454,73 +483,76 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
     // -- Arithmetic --
 
     fn add(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("+", lhs, rhs)
+        self.binop(CBinOp::Add, lhs, rhs)
     }
     fn fadd(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("+", lhs, rhs)
+        self.binop(CBinOp::Add, lhs, rhs)
     }
     fn fadd_fast(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("+", lhs, rhs)
+        self.binop(CBinOp::Add, lhs, rhs)
     }
     fn fadd_algebraic(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("+", lhs, rhs)
+        self.binop(CBinOp::Add, lhs, rhs)
     }
     fn sub(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("-", lhs, rhs)
+        self.binop(CBinOp::Sub, lhs, rhs)
     }
     fn fsub(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("-", lhs, rhs)
+        self.binop(CBinOp::Sub, lhs, rhs)
     }
     fn fsub_fast(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("-", lhs, rhs)
+        self.binop(CBinOp::Sub, lhs, rhs)
     }
     fn fsub_algebraic(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("-", lhs, rhs)
+        self.binop(CBinOp::Sub, lhs, rhs)
     }
     fn mul(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("*", lhs, rhs)
+        self.binop(CBinOp::Mul, lhs, rhs)
     }
     fn fmul(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("*", lhs, rhs)
+        self.binop(CBinOp::Mul, lhs, rhs)
     }
     fn fmul_fast(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("*", lhs, rhs)
+        self.binop(CBinOp::Mul, lhs, rhs)
     }
     fn fmul_algebraic(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("*", lhs, rhs)
+        self.binop(CBinOp::Mul, lhs, rhs)
     }
     fn udiv(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.unsigned_binop("/", lhs, rhs)
+        self.unsigned_binop(CBinOp::Div, lhs, rhs)
     }
     fn exactudiv(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.unsigned_binop("/", lhs, rhs)
+        self.unsigned_binop(CBinOp::Div, lhs, rhs)
     }
     fn sdiv(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("/", lhs, rhs)
+        self.binop(CBinOp::Div, lhs, rhs)
     }
     fn exactsdiv(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("/", lhs, rhs)
+        self.binop(CBinOp::Div, lhs, rhs)
     }
     fn fdiv(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("/", lhs, rhs)
+        self.binop(CBinOp::Div, lhs, rhs)
     }
     fn fdiv_fast(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("/", lhs, rhs)
+        self.binop(CBinOp::Div, lhs, rhs)
     }
     fn fdiv_algebraic(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("/", lhs, rhs)
+        self.binop(CBinOp::Div, lhs, rhs)
     }
     fn urem(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.unsigned_binop("%", lhs, rhs)
+        self.unsigned_binop(CBinOp::Rem, lhs, rhs)
     }
     fn srem(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("%", lhs, rhs)
+        self.binop(CBinOp::Rem, lhs, rhs)
     }
     fn frem(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
         let ty = self.cx.values.borrow().get_type(lhs);
         let l = self.cx.render_value(lhs);
         let r = self.cx.render_value(rhs);
-        self.new_temp_with_stmt(ty, &format!("fmod({l}, {r})"))
+        self.new_temp_with_stmt(
+            ty,
+            CExpr::call(CExpr::var("fmod"), vec![CExpr::var(l), CExpr::var(r)]),
+        )
     }
     fn frem_fast(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
         self.frem(lhs, rhs)
@@ -537,7 +569,14 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let l = self.cx.render_value(lhs);
         let r = self.cx.render_value(rhs);
         let t = self.cx.render_type(ty);
-        self.new_temp_with_stmt(ty, &format!("({t})({l}) << ({r})"))
+        self.new_temp_with_stmt(
+            ty,
+            CExpr::binop(
+                CExpr::cast(t, CExpr::paren(CExpr::var(l))),
+                CBinOp::Shl,
+                CExpr::paren(CExpr::var(r)),
+            ),
+        )
     }
     fn lshr(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
         // Logical shift right: cast to unsigned, shift, cast back
@@ -547,10 +586,27 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         if let Some(unsigned_ty) = self.unsigned_type(ty) {
             let ut = self.cx.render_type(unsigned_ty);
             let t = self.cx.render_type(ty);
-            self.new_temp_with_stmt(ty, &format!("({t})(({ut})({l}) >> ({r}))"))
+            self.new_temp_with_stmt(
+                ty,
+                CExpr::cast(
+                    t,
+                    CExpr::paren(CExpr::binop(
+                        CExpr::cast(ut, CExpr::paren(CExpr::var(l))),
+                        CBinOp::Shr,
+                        CExpr::paren(CExpr::var(r)),
+                    )),
+                ),
+            )
         } else {
             let t = self.cx.render_type(ty);
-            self.new_temp_with_stmt(ty, &format!("({t})({l}) >> ({r})"))
+            self.new_temp_with_stmt(
+                ty,
+                CExpr::binop(
+                    CExpr::cast(t, CExpr::paren(CExpr::var(l))),
+                    CBinOp::Shr,
+                    CExpr::paren(CExpr::var(r)),
+                ),
+            )
         }
     }
     fn ashr(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
@@ -559,23 +615,30 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let l = self.cx.render_value(lhs);
         let r = self.cx.render_value(rhs);
         let t = self.cx.render_type(ty);
-        self.new_temp_with_stmt(ty, &format!("({t})({l}) >> ({r})"))
+        self.new_temp_with_stmt(
+            ty,
+            CExpr::binop(
+                CExpr::cast(t, CExpr::paren(CExpr::var(l))),
+                CBinOp::Shr,
+                CExpr::paren(CExpr::var(r)),
+            ),
+        )
     }
 
     fn and(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("&", lhs, rhs)
+        self.binop(CBinOp::BitAnd, lhs, rhs)
     }
     fn or(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("|", lhs, rhs)
+        self.binop(CBinOp::BitOr, lhs, rhs)
     }
     fn xor(&mut self, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
-        self.binop("^", lhs, rhs)
+        self.binop(CBinOp::BitXor, lhs, rhs)
     }
 
     fn neg(&mut self, v: ValueRef) -> ValueRef {
         let ty = self.cx.values.borrow().get_type(v);
         let val = self.cx.render_value(v);
-        self.new_temp_with_stmt(ty, &format!("-({val})"))
+        self.new_temp_with_stmt(ty, CExpr::unary(CUnaryOp::Neg, CExpr::var(val)))
     }
     fn fneg(&mut self, v: ValueRef) -> ValueRef {
         self.neg(v)
@@ -590,12 +653,9 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         );
         drop(types);
         if is_bool {
-            // Boolean NOT: ! gives correct 0/1 result.
-            // Bitwise ~ on int8_t booleans would give 0xFE for ~1, which is
-            // truthy -- breaking all boolean logic.
-            self.new_temp_with_stmt(ty, &format!("!({val})"))
+            self.new_temp_with_stmt(ty, CExpr::unary(CUnaryOp::LogNot, CExpr::var(val)))
         } else {
-            self.new_temp_with_stmt(ty, &format!("~({val})"))
+            self.new_temp_with_stmt(ty, CExpr::unary(CUnaryOp::BitNot, CExpr::var(val)))
         }
     }
 
@@ -641,8 +701,16 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             }
         }
 
-        self.emit(format!(
-            "{overflow_name} = {builtin}({l}, {r}, &{result_name});"
+        self.emit(CStmt::assign(
+            CExpr::var(&overflow_name),
+            CExpr::call(
+                CExpr::var(builtin),
+                vec![
+                    CExpr::var(l),
+                    CExpr::var(r),
+                    CExpr::addr_of(CExpr::var(&result_name)),
+                ],
+            ),
         ));
         (result, overflow)
     }
@@ -658,7 +726,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 signed: true,
             });
             let v = self.cx.render_value(val);
-            self.new_temp_with_stmt(i8_ty, &format!("(int8_t)({v})"))
+            self.new_temp_with_stmt(i8_ty, CExpr::cast("int8_t", CExpr::paren(CExpr::var(v))))
         } else {
             val
         }
@@ -670,7 +738,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             let actual_ty = self.cx.values.borrow().get_type(val);
             if actual_ty != bool_ty {
                 let v = self.cx.render_value(val);
-                return self.new_temp_with_stmt(bool_ty, &format!("(_Bool)({v})"));
+                return self.new_temp_with_stmt(
+                    bool_ty,
+                    CExpr::cast("_Bool", CExpr::paren(CExpr::var(v))),
+                );
             }
             return val;
         }
@@ -743,20 +814,25 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                         func.add_local_decl(format!("{t};"));
                     }
                 }
-                self.emit(format!(
-                    "memcpy({result_name}, {p}, sizeof({result_name}));"
-                ));
+                self.emit(CStmt::expr(CExpr::call(
+                    CExpr::var("memcpy"),
+                    vec![
+                        CExpr::var(&result_name),
+                        CExpr::var(&p),
+                        CExpr::sizeof_expr(CExpr::var(&result_name)),
+                    ],
+                )));
                 result
             }
             CTypeKind::Function { .. } => {
                 // Function pointer load: *(void (**)(args))ptr
                 // render_decl with name "*" gives "ret (**)(args)" which is pointer-to-fn-ptr
                 let ptr_to_fnptr = self.cx.render_type_decl(ty, "*");
-                self.new_temp_with_stmt(ty, &format!("*({ptr_to_fnptr}){p}"))
+                self.new_temp_with_stmt(ty, CExpr::deref(ptr_to_fnptr, CExpr::var(&p)))
             }
             _ => {
                 let t = self.cx.render_type(ty);
-                self.new_temp_with_stmt(ty, &format!("*({t} *){p}"))
+                self.new_temp_with_stmt(ty, CExpr::deref(format!("{t} *"), CExpr::var(&p)))
             }
         }
     }
@@ -764,7 +840,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
     fn volatile_load(&mut self, ty: TypeRef, ptr: ValueRef) -> ValueRef {
         let p = self.cx.render_value(ptr);
         let t = self.cx.render_type(ty);
-        self.new_temp_with_stmt(ty, &format!("*(volatile {t} *){p}"))
+        self.new_temp_with_stmt(ty, CExpr::deref(format!("volatile {t} *"), CExpr::var(&p)))
     }
 
     fn atomic_load(
@@ -781,10 +857,23 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             // libatomic dependency (__atomic_load_16).
             self.new_temp_with_stmt(
                 ty,
-                &format!("__sync_val_compare_and_swap(({t} *){p}, 0, 0)"),
+                CExpr::call(
+                    CExpr::var("__sync_val_compare_and_swap"),
+                    vec![
+                        CExpr::cast(format!("{t} *"), CExpr::var(&p)),
+                        CExpr::lit("0"),
+                        CExpr::lit("0"),
+                    ],
+                ),
             )
         } else {
-            self.new_temp_with_stmt(ty, &format!("atomic_load((_Atomic({t}) *){p})"))
+            self.new_temp_with_stmt(
+                ty,
+                CExpr::call(
+                    CExpr::var("atomic_load"),
+                    vec![CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&p))],
+                ),
+            )
         }
     }
 
@@ -868,10 +957,20 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let ty = self.cx.values.borrow().get_type(val);
         let is_array = matches!(self.cx.types.borrow().get(ty), CTypeKind::Array { .. });
         if is_array {
-            self.emit(format!("memcpy({p}, &{v}, sizeof({v}));"));
+            self.emit(CStmt::expr(CExpr::call(
+                CExpr::var("memcpy"),
+                vec![
+                    CExpr::var(&p),
+                    CExpr::addr_of(CExpr::var(&v)),
+                    CExpr::sizeof_expr(CExpr::var(&v)),
+                ],
+            )));
         } else {
             let t = self.cx.render_type(ty);
-            self.emit(format!("*({t} *){p} = {v};"));
+            self.emit(CStmt::assign(
+                CExpr::deref(format!("{t} *"), CExpr::var(&p)),
+                CExpr::var(&v),
+            ));
         }
         val
     }
@@ -907,9 +1006,28 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                     func.add_local_decl(format!("{t} {old_name};"));
                 }
             }
-            self.emit(format!("do {{ {old_name} = *({t} *){p}; }} while (!__sync_bool_compare_and_swap(({t} *){p}, {old_name}, {v}));"));
+            let cast_ptr = CExpr::cast(format!("{t} *"), CExpr::var(&p));
+            self.emit(CStmt::DoWhile {
+                body: vec![CStmt::assign(
+                    CExpr::var(&old_name),
+                    CExpr::deref(format!("{t} *"), CExpr::var(&p)),
+                )],
+                cond: CExpr::unary(
+                    CUnaryOp::LogNot,
+                    CExpr::call(
+                        CExpr::var("__sync_bool_compare_and_swap"),
+                        vec![cast_ptr, CExpr::var(&old_name), CExpr::var(&v)],
+                    ),
+                ),
+            });
         } else {
-            self.emit(format!("atomic_store((_Atomic({t}) *){p}, {v});"));
+            self.emit(CStmt::expr(CExpr::call(
+                CExpr::var("atomic_store"),
+                vec![
+                    CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&p)),
+                    CExpr::var(&v),
+                ],
+            )));
         }
     }
 
@@ -923,24 +1041,27 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let idx0 = self.cx.render_value(indices[0]);
         let t = self.cx.render_type(ty);
 
+        let base = CExpr::cast("uintptr_t", CExpr::var(&p));
+        let scaled_idx0 = CExpr::binop(
+            CExpr::cast("int64_t", CExpr::paren(CExpr::var(&idx0))),
+            CBinOp::Mul,
+            CExpr::cast("int64_t", CExpr::sizeof_ty(&t)),
+        );
+
         if indices.len() == 1 {
-            self.new_temp_with_stmt(
-                ptr_ty,
-                &format!("(void *)((uintptr_t){p} + (int64_t)({idx0}) * (int64_t)sizeof({t}))"),
-            )
+            let sum = CExpr::binop(base, CBinOp::Add, scaled_idx0);
+            self.new_temp_with_stmt(ptr_ty, CExpr::cast("void *", CExpr::paren(sum)))
         } else if indices.len() == 2 {
             let idx1 = self.cx.render_value(indices[1]);
-            self.new_temp_with_stmt(
-                ptr_ty,
-                &format!(
-                    "(void *)((uintptr_t){p} + (int64_t)({idx0}) * (int64_t)sizeof({t}) + (int64_t)({idx1}))"
-                ),
-            )
+            let sum = CExpr::binop(
+                CExpr::binop(base, CBinOp::Add, scaled_idx0),
+                CBinOp::Add,
+                CExpr::cast("int64_t", CExpr::paren(CExpr::var(&idx1))),
+            );
+            self.new_temp_with_stmt(ptr_ty, CExpr::cast("void *", CExpr::paren(sum)))
         } else {
-            self.new_temp_with_stmt(
-                ptr_ty,
-                &format!("(void *)((uintptr_t){p} + (int64_t)({idx0}) * (int64_t)sizeof({t}))"),
-            )
+            let sum = CExpr::binop(base, CBinOp::Add, scaled_idx0);
+            self.new_temp_with_stmt(ptr_ty, CExpr::cast("void *", CExpr::paren(sum)))
         }
     }
 
@@ -974,12 +1095,24 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 return self.cast(val, dest_ty);
             }
         };
-        self.new_temp_with_stmt(
-            dest_ty,
-            &format!(
-                "__builtin_isnan({v}) ? ({dt})0 : ({v} < 0.0 ? ({dt})0 : ({v} > {max_val} ? ({dt}){max_val} : ({dt}){v}))"
-            ),
-        )
+        let isnan = CExpr::call(CExpr::var("__builtin_isnan"), vec![CExpr::var(v.clone())]);
+        let zero = CExpr::cast(dt.clone(), CExpr::lit("0"));
+        let cast_v = CExpr::cast(dt.clone(), CExpr::var(v.clone()));
+        let cast_max = CExpr::cast(dt, CExpr::lit(max_val.clone()));
+        // v > max_val ? (dt)max_val : (dt)v
+        let inner = CExpr::ternary(
+            CExpr::binop(CExpr::var(v.clone()), CBinOp::Gt, CExpr::lit(max_val)),
+            cast_max,
+            cast_v,
+        );
+        // v < 0.0 ? (dt)0 : inner
+        let mid = CExpr::ternary(
+            CExpr::binop(CExpr::var(v), CBinOp::Lt, CExpr::lit("0.0")),
+            zero.clone(),
+            inner,
+        );
+        // isnan(v) ? (dt)0 : mid
+        self.new_temp_with_stmt(dest_ty, CExpr::ternary(isnan, zero, mid))
     }
     fn fptosi_sat(&mut self, val: ValueRef, dest_ty: TypeRef) -> ValueRef {
         // Saturating float-to-signed-int: clamp to [MIN, MAX], NaN -> 0
@@ -999,12 +1132,25 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 return self.cast(val, dest_ty);
             }
         };
-        self.new_temp_with_stmt(
-            dest_ty,
-            &format!(
-                "__builtin_isnan({v}) ? ({dt})0 : ({v} < {min_val} ? ({dt}){min_val} : ({v} > {max_val} ? ({dt}){max_val} : ({dt}){v}))"
-            ),
-        )
+        let isnan = CExpr::call(CExpr::var("__builtin_isnan"), vec![CExpr::var(v.clone())]);
+        let zero = CExpr::cast(dt.clone(), CExpr::lit("0"));
+        let cast_v = CExpr::cast(dt.clone(), CExpr::var(v.clone()));
+        let cast_max = CExpr::cast(dt.clone(), CExpr::lit(max_val.clone()));
+        // v > max_val ? (dt)max_val : (dt)v
+        let inner = CExpr::ternary(
+            CExpr::binop(CExpr::var(v.clone()), CBinOp::Gt, CExpr::lit(max_val)),
+            cast_max,
+            cast_v,
+        );
+        // v < min_val ? (dt)min_val : inner
+        let cast_min = CExpr::cast(dt, CExpr::lit(min_val.clone()));
+        let mid = CExpr::ternary(
+            CExpr::binop(CExpr::var(v.clone()), CBinOp::Lt, CExpr::lit(min_val)),
+            cast_min,
+            inner,
+        );
+        // isnan(v) ? (dt)0 : mid
+        self.new_temp_with_stmt(dest_ty, CExpr::ternary(isnan, zero, mid))
     }
     fn fptoui(&mut self, val: ValueRef, dest_ty: TypeRef) -> ValueRef {
         // Float to unsigned int: cast to signed dest first, then reinterpret.
@@ -1016,7 +1162,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             let v = self.cx.render_value(val);
             let ut = self.cx.render_type(unsigned_dest);
             let dt = self.cx.render_type(dest_ty);
-            self.new_temp_with_stmt(dest_ty, &format!("({dt})({ut}){v}"))
+            self.new_temp_with_stmt(dest_ty, CExpr::cast(dt, CExpr::cast(ut, CExpr::var(v))))
         } else {
             self.cast(val, dest_ty)
         }
@@ -1034,7 +1180,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             let v = self.cx.render_value(val);
             let us = self.cx.render_type(unsigned_src);
             let dt = self.cx.render_type(dest_ty);
-            self.new_temp_with_stmt(dest_ty, &format!("({dt})({us}){v}"))
+            self.new_temp_with_stmt(dest_ty, CExpr::cast(dt, CExpr::cast(us, CExpr::var(v))))
         } else {
             self.cast(val, dest_ty)
         }
@@ -1098,10 +1244,15 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 func.add_local_decl(format!("{st} {src_name};"));
             }
         }
-        self.emit(format!("{src_name} = {v};"));
-        self.emit(format!(
-            "memcpy(&{result_name}, &{src_name}, sizeof({result_name}));"
-        ));
+        self.emit(CStmt::assign(CExpr::var(&src_name), CExpr::var(v)));
+        self.emit(CStmt::expr(CExpr::call(
+            CExpr::var("memcpy"),
+            vec![
+                CExpr::addr_of(CExpr::var(&result_name)),
+                CExpr::addr_of(CExpr::var(&src_name)),
+                CExpr::sizeof_expr(CExpr::var(&result_name)),
+            ],
+        )));
         result
     }
     fn intcast(&mut self, val: ValueRef, dest_ty: TypeRef, is_signed: bool) -> ValueRef {
@@ -1124,12 +1275,12 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let r = self.cx.render_value(rhs);
 
         let c_op = match op {
-            IntPredicate::IntEQ => "==",
-            IntPredicate::IntNE => "!=",
-            IntPredicate::IntUGT | IntPredicate::IntSGT => ">",
-            IntPredicate::IntUGE | IntPredicate::IntSGE => ">=",
-            IntPredicate::IntULT | IntPredicate::IntSLT => "<",
-            IntPredicate::IntULE | IntPredicate::IntSLE => "<=",
+            IntPredicate::IntEQ => CBinOp::Eq,
+            IntPredicate::IntNE => CBinOp::Ne,
+            IntPredicate::IntUGT | IntPredicate::IntSGT => CBinOp::Gt,
+            IntPredicate::IntUGE | IntPredicate::IntSGE => CBinOp::Ge,
+            IntPredicate::IntULT | IntPredicate::IntSLT => CBinOp::Lt,
+            IntPredicate::IntULE | IntPredicate::IntSLE => CBinOp::Le,
         };
 
         // In LLVM IR, integer constants are typeless -- signedness comes from
@@ -1175,7 +1326,14 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 signed: false,
             });
             let ut = self.cx.render_type(cast_ty);
-            return self.new_temp_with_stmt(bool_ty, &format!("({ut}){l} {c_op} ({ut}){r}"));
+            return self.new_temp_with_stmt(
+                bool_ty,
+                CExpr::binop(
+                    CExpr::cast(&ut, CExpr::var(&l)),
+                    c_op,
+                    CExpr::cast(ut, CExpr::var(&r)),
+                ),
+            );
         } else if is_signed || cast_bits > 0 {
             // For signed and equality comparisons, cast to a signed type
             // wide enough for both operands.
@@ -1184,22 +1342,31 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 signed: true,
             });
             let st = self.cx.render_type(cast_ty);
-            return self.new_temp_with_stmt(bool_ty, &format!("({st}){l} {c_op} ({st}){r}"));
+            return self.new_temp_with_stmt(
+                bool_ty,
+                CExpr::binop(
+                    CExpr::cast(&st, CExpr::var(&l)),
+                    c_op,
+                    CExpr::cast(st, CExpr::var(&r)),
+                ),
+            );
         }
-        self.new_temp_with_stmt(bool_ty, &format!("{l} {c_op} {r}"))
+        self.new_temp_with_stmt(bool_ty, CExpr::binop(CExpr::var(l), c_op, CExpr::var(r)))
     }
 
     fn fcmp(&mut self, op: RealPredicate, lhs: ValueRef, rhs: ValueRef) -> ValueRef {
         let bool_ty = self.cx.intern_type(CTypeKind::Bool);
         let l = self.cx.render_value(lhs);
         let r = self.cx.render_value(rhs);
+        let isnan_l = CExpr::call(CExpr::var("__builtin_isnan"), vec![CExpr::var(l.clone())]);
+        let isnan_r = CExpr::call(CExpr::var("__builtin_isnan"), vec![CExpr::var(r.clone())]);
         let c_op = match op {
-            RealPredicate::RealOEQ | RealPredicate::RealUEQ => "==",
-            RealPredicate::RealONE | RealPredicate::RealUNE => "!=",
-            RealPredicate::RealOGT | RealPredicate::RealUGT => ">",
-            RealPredicate::RealOGE | RealPredicate::RealUGE => ">=",
-            RealPredicate::RealOLT | RealPredicate::RealULT => "<",
-            RealPredicate::RealOLE | RealPredicate::RealULE => "<=",
+            RealPredicate::RealOEQ | RealPredicate::RealUEQ => CBinOp::Eq,
+            RealPredicate::RealONE | RealPredicate::RealUNE => CBinOp::Ne,
+            RealPredicate::RealOGT | RealPredicate::RealUGT => CBinOp::Gt,
+            RealPredicate::RealOGE | RealPredicate::RealUGE => CBinOp::Ge,
+            RealPredicate::RealOLT | RealPredicate::RealULT => CBinOp::Lt,
+            RealPredicate::RealOLE | RealPredicate::RealULE => CBinOp::Le,
             RealPredicate::RealPredicateFalse => {
                 return self.cx.const_bool(false);
             }
@@ -1210,18 +1377,20 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 // Ordered: both are not NaN
                 return self.new_temp_with_stmt(
                     bool_ty,
-                    &format!("!__builtin_isnan({l}) && !__builtin_isnan({r})"),
+                    CExpr::binop(
+                        CExpr::unary(CUnaryOp::LogNot, isnan_l),
+                        CBinOp::LogAnd,
+                        CExpr::unary(CUnaryOp::LogNot, isnan_r),
+                    ),
                 );
             }
             RealPredicate::RealUNO => {
                 // Unordered: either is NaN
-                return self.new_temp_with_stmt(
-                    bool_ty,
-                    &format!("__builtin_isnan({l}) || __builtin_isnan({r})"),
-                );
+                return self
+                    .new_temp_with_stmt(bool_ty, CExpr::binop(isnan_l, CBinOp::LogOr, isnan_r));
             }
         };
-        self.new_temp_with_stmt(bool_ty, &format!("{l} {c_op} {r}"))
+        self.new_temp_with_stmt(bool_ty, CExpr::binop(CExpr::var(l), c_op, CExpr::var(r)))
     }
 
     fn memcpy(
@@ -1237,7 +1406,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let d = self.cx.render_value(dst);
         let s = self.cx.render_value(src);
         let sz = self.cx.render_value(size);
-        self.emit(format!("memcpy({d}, {s}, {sz});"));
+        self.emit(CStmt::expr(CExpr::call(
+            CExpr::var("memcpy"),
+            vec![CExpr::var(d), CExpr::var(s), CExpr::var(sz)],
+        )));
     }
 
     fn memmove(
@@ -1252,7 +1424,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let d = self.cx.render_value(dst);
         let s = self.cx.render_value(src);
         let sz = self.cx.render_value(size);
-        self.emit(format!("memmove({d}, {s}, {sz});"));
+        self.emit(CStmt::expr(CExpr::call(
+            CExpr::var("memmove"),
+            vec![CExpr::var(d), CExpr::var(s), CExpr::var(sz)],
+        )));
     }
 
     fn memset(
@@ -1266,7 +1441,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let p = self.cx.render_value(ptr);
         let b = self.cx.render_value(fill_byte);
         let sz = self.cx.render_value(size);
-        self.emit(format!("memset({p}, {b}, {sz});"));
+        self.emit(CStmt::expr(CExpr::call(
+            CExpr::var("memset"),
+            vec![CExpr::var(p), CExpr::var(b), CExpr::var(sz)],
+        )));
     }
 
     fn select(&mut self, cond: ValueRef, then_val: ValueRef, else_val: ValueRef) -> ValueRef {
@@ -1274,20 +1452,26 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let c = self.cx.render_value(cond);
         let t = self.cx.render_value(then_val);
         let e = self.cx.render_value(else_val);
-        self.new_temp_with_stmt(ty, &format!("({c}) ? ({t}) : ({e})"))
+        self.new_temp_with_stmt(
+            ty,
+            CExpr::ternary(CExpr::var(c), CExpr::var(t), CExpr::var(e)),
+        )
     }
 
     fn va_arg(&mut self, list: ValueRef, ty: TypeRef) -> ValueRef {
         let l = self.cx.render_value(list);
         let t = self.cx.render_type(ty);
-        self.new_temp_with_stmt(ty, &format!("va_arg({l}, {t})"))
+        self.new_temp_with_stmt(
+            ty,
+            CExpr::call(CExpr::var("va_arg"), vec![CExpr::var(l), CExpr::raw(t)]),
+        )
     }
 
     fn extract_element(&mut self, vec: ValueRef, idx: ValueRef) -> ValueRef {
         let ty = self.element_type(self.cx.values.borrow().get_type(vec));
         let v = self.cx.render_value(vec);
         let i = self.cx.render_value(idx);
-        self.new_temp_with_stmt(ty, &format!("{v}[{i}]"))
+        self.new_temp_with_stmt(ty, CExpr::index(CExpr::var(v), CExpr::var(i)))
     }
 
     fn vector_splat(&mut self, num_elts: usize, elt: ValueRef) -> ValueRef {
@@ -1297,8 +1481,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             len: num_elts as u64,
         });
         let e = self.cx.render_value(elt);
-        let elts: Vec<_> = (0..num_elts).map(|_| e.clone()).collect();
-        self.new_temp_with_stmt(vec_ty, &format!("{{ {} }}", elts.join(", ")))
+        self.new_temp_with_stmt(
+            vec_ty,
+            CExpr::InitList((0..num_elts).map(|_| CExpr::var(e.clone())).collect()),
+        )
     }
 
     fn extract_value(&mut self, agg_val: ValueRef, idx: u64) -> ValueRef {
@@ -1311,7 +1497,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             }
         };
         let v = self.cx.render_value(agg_val);
-        self.new_temp_with_stmt(field_ty, &format!("{v}.f{idx}"))
+        self.new_temp_with_stmt(field_ty, CExpr::field(CExpr::var(v), format!("f{idx}")))
     }
 
     fn insert_value(&mut self, agg_val: ValueRef, elt: ValueRef, idx: u64) -> ValueRef {
@@ -1333,12 +1519,22 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             CValueKind::Undef | CValueKind::Poison
         );
         if is_undef {
-            self.emit(format!("memset(&{result_name}, 0, sizeof({result_name}));"));
+            self.emit(CStmt::expr(CExpr::call(
+                CExpr::var("memset"),
+                vec![
+                    CExpr::addr_of(CExpr::var(&result_name)),
+                    CExpr::lit("0"),
+                    CExpr::sizeof_expr(CExpr::var(&result_name)),
+                ],
+            )));
         } else {
             let agg = self.cx.render_value(agg_val);
-            self.emit(format!("{result_name} = {agg};"));
+            self.emit(CStmt::assign(CExpr::var(&result_name), CExpr::var(agg)));
         }
-        self.emit(format!("{result_name}.f{idx} = {e};"));
+        self.emit(CStmt::assign(
+            CExpr::field(CExpr::var(&result_name), format!("f{idx}")),
+            CExpr::var(e),
+        ));
         result
     }
 
@@ -1365,12 +1561,12 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         // via longjmp.  If the chain is empty (no enclosing catch_unwind),
         // abort -- matching the standard Rust behavior for uncaught panics.
         let e = self.cx.render_value(exn0);
-        self.emit(format!(
+        self.emit(CStmt::raw(format!(
             "if (__rustc_unwind_chain) {{ \
                 __rustc_unwind_chain->exception_ptr = (void *){e}; \
                 __rustc_longjmp(__rustc_unwind_chain->buf, 1); \
             }} else {{ abort(); }}"
-        ));
+        )));
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
         if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
@@ -1385,15 +1581,15 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
     fn cleanup_ret(&mut self, _funclet: &CFunclet, unwind: Option<BasicBlockId>) {
         if let Some(target) = unwind {
             let label = self.block_label(target);
-            self.emit(format!("goto {label};"));
+            self.emit(CStmt::goto(label));
         } else {
-            self.emit(
+            self.emit(CStmt::raw(
                 "if (__rustc_unwind_chain) { \
                     __rustc_unwind_chain->exception_ptr = __exn_ptr; \
                     __rustc_longjmp(__rustc_unwind_chain->buf, 1); \
                 } else { abort(); }"
                     .to_string(),
-            );
+            ));
         }
         let bb = self.current_bb;
         let mut module = self.cx.module.borrow_mut();
@@ -1431,11 +1627,18 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let s = self.cx.render_value(src);
         let t = self.cx.render_type(ty);
 
-        let old = self.new_temp_with_stmt(ty, &c);
+        let old = self.new_temp_with_stmt(ty, CExpr::var(c));
         let old_name = self.cx.render_value(old);
         let success = self.new_temp_with_stmt(
             bool_ty,
-            &format!("atomic_compare_exchange_strong((_Atomic({t}) *){d}, &{old_name}, {s})"),
+            CExpr::call(
+                CExpr::var("atomic_compare_exchange_strong"),
+                vec![
+                    CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d)),
+                    CExpr::addr_of(CExpr::var(&old_name)),
+                    CExpr::var(s),
+                ],
+            ),
         );
         (old, success)
     }
@@ -1455,22 +1658,64 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
 
         match op {
             AtomicRmwBinOp::AtomicXchg => {
-                self.new_temp_with_stmt(ty, &format!("atomic_exchange((_Atomic({t}) *){d}, {s})"))
+                let atomic_ptr = CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d));
+                self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("atomic_exchange"),
+                        vec![atomic_ptr, CExpr::var(&s)],
+                    ),
+                )
             }
             AtomicRmwBinOp::AtomicAdd => {
-                self.new_temp_with_stmt(ty, &format!("atomic_fetch_add((_Atomic({t}) *){d}, {s})"))
+                let atomic_ptr = CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d));
+                self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("atomic_fetch_add"),
+                        vec![atomic_ptr, CExpr::var(&s)],
+                    ),
+                )
             }
             AtomicRmwBinOp::AtomicSub => {
-                self.new_temp_with_stmt(ty, &format!("atomic_fetch_sub((_Atomic({t}) *){d}, {s})"))
+                let atomic_ptr = CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d));
+                self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("atomic_fetch_sub"),
+                        vec![atomic_ptr, CExpr::var(&s)],
+                    ),
+                )
             }
             AtomicRmwBinOp::AtomicAnd => {
-                self.new_temp_with_stmt(ty, &format!("atomic_fetch_and((_Atomic({t}) *){d}, {s})"))
+                let atomic_ptr = CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d));
+                self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("atomic_fetch_and"),
+                        vec![atomic_ptr, CExpr::var(&s)],
+                    ),
+                )
             }
             AtomicRmwBinOp::AtomicOr => {
-                self.new_temp_with_stmt(ty, &format!("atomic_fetch_or((_Atomic({t}) *){d}, {s})"))
+                let atomic_ptr = CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d));
+                self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("atomic_fetch_or"),
+                        vec![atomic_ptr, CExpr::var(&s)],
+                    ),
+                )
             }
             AtomicRmwBinOp::AtomicXor => {
-                self.new_temp_with_stmt(ty, &format!("atomic_fetch_xor((_Atomic({t}) *){d}, {s})"))
+                let atomic_ptr = CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d));
+                self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("atomic_fetch_xor"),
+                        vec![atomic_ptr, CExpr::var(&s)],
+                    ),
+                )
             }
             AtomicRmwBinOp::AtomicNand => {
                 // NAND = ~(old & val), implemented via CAS loop
@@ -1485,10 +1730,37 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                         func.add_local_decl(format!("{t} {desired_name};"));
                     }
                 }
-                self.emit(format!("{old_name} = atomic_load((_Atomic({t}) *){d});"));
-                self.emit(format!("do {{"));
-                self.emit(format!("  {desired_name} = ~({old_name} & {s});"));
-                self.emit(format!("}} while (!atomic_compare_exchange_weak((_Atomic({t}) *){d}, &{old_name}, {desired_name}));"));
+                self.emit(CStmt::assign(
+                    CExpr::var(&old_name),
+                    CExpr::call(
+                        CExpr::var("atomic_load"),
+                        vec![CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d))],
+                    ),
+                ));
+                self.emit(CStmt::DoWhile {
+                    body: vec![CStmt::assign(
+                        CExpr::var(&desired_name),
+                        CExpr::unary(
+                            CUnaryOp::BitNot,
+                            CExpr::paren(CExpr::binop(
+                                CExpr::var(&old_name),
+                                CBinOp::BitAnd,
+                                CExpr::var(&s),
+                            )),
+                        ),
+                    )],
+                    cond: CExpr::unary(
+                        CUnaryOp::LogNot,
+                        CExpr::call(
+                            CExpr::var("atomic_compare_exchange_weak"),
+                            vec![
+                                CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d)),
+                                CExpr::addr_of(CExpr::var(&old_name)),
+                                CExpr::var(&desired_name),
+                            ],
+                        ),
+                    ),
+                });
                 old
             }
             AtomicRmwBinOp::AtomicMin
@@ -1532,10 +1804,27 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                     }
                     _ => unreachable!(),
                 };
-                self.emit(format!("{old_name} = atomic_load((_Atomic({t}) *){d});"));
-                self.emit(format!("do {{"));
-                self.emit(format!("  {desired_name} = {cmp};"));
-                self.emit(format!("}} while (!atomic_compare_exchange_weak((_Atomic({t}) *){d}, &{old_name}, {desired_name}));"));
+                self.emit(CStmt::assign(
+                    CExpr::var(&old_name),
+                    CExpr::call(
+                        CExpr::var("atomic_load"),
+                        vec![CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d))],
+                    ),
+                ));
+                self.emit(CStmt::DoWhile {
+                    body: vec![CStmt::assign(CExpr::var(&desired_name), CExpr::raw(cmp))],
+                    cond: CExpr::unary(
+                        CUnaryOp::LogNot,
+                        CExpr::call(
+                            CExpr::var("atomic_compare_exchange_weak"),
+                            vec![
+                                CExpr::cast(format!("_Atomic({t}) *"), CExpr::var(&d)),
+                                CExpr::addr_of(CExpr::var(&old_name)),
+                                CExpr::var(&desired_name),
+                            ],
+                        ),
+                    ),
+                });
                 old
             }
         }
@@ -1551,7 +1840,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             SynchronizationScope::SingleThread => "atomic_signal_fence",
             SynchronizationScope::CrossThread => "atomic_thread_fence",
         };
-        self.emit(format!("{fence_fn}({c_order});"));
+        self.emit(CStmt::expr(CExpr::call(
+            CExpr::var(fence_fn),
+            vec![CExpr::var(c_order)],
+        )));
     }
 
     fn set_invariant_load(&mut self, _load: ValueRef) {
@@ -1587,11 +1879,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             (None, args)
         };
 
-        let args_str: Vec<_> = actual_args
+        let args_exprs: Vec<_> = actual_args
             .iter()
-            .map(|a| self.cx.render_value(*a))
+            .map(|a| CExpr::var(self.cx.render_value(*a)))
             .collect();
-        let args_joined = args_str.join(", ");
 
         // Determine return type and function name
         let (ret_ty, f) = {
@@ -1619,7 +1910,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         {
             let is_void = matches!(self.cx.types.borrow().get(ret_ty), CTypeKind::Void);
             if is_void {
-                self.emit(format!("{f}({args_joined});"));
+                self.emit(CStmt::expr(CExpr::call(CExpr::var(&f), args_exprs)));
                 // For indirect return, codegen_ssa never uses the call
                 // result (it reads from the output pointer instead), but
                 // it does check the type.  Return an undef of the expected
@@ -1634,14 +1925,18 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                     self.cx.const_null(self.cx.type_ptr())
                 }
             } else {
-                let result = self.new_temp_with_stmt(ret_ty, &format!("{f}({args_joined})"));
+                let result =
+                    self.new_temp_with_stmt(ret_ty, CExpr::call(CExpr::var(&f), args_exprs));
                 // For C-ABI indirect return, copy the return value into
                 // the sret buffer and return the sret pointer.
                 if let Some(sret) = sret_ptr {
                     let r = self.cx.render_value(result);
                     let s = self.cx.render_value(sret);
                     let t = self.cx.render_type(ret_ty);
-                    self.emit(format!("*({t} *){s} = {r};"));
+                    self.emit(CStmt::assign(
+                        CExpr::deref(format!("{t} *"), CExpr::var(s)),
+                        CExpr::var(r),
+                    ));
                     return sret;
                 }
                 // If the ABI returns a boolean as int8_t, convert back
@@ -1652,7 +1947,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                         if s.is_bool() {
                             let bool_ty = self.cx.intern_type(CTypeKind::Bool);
                             let v = self.cx.render_value(result);
-                            return self.new_temp_with_stmt(bool_ty, &format!("(_Bool)({v})"));
+                            return self.new_temp_with_stmt(
+                                bool_ty,
+                                CExpr::cast("_Bool".to_string(), CExpr::paren(CExpr::var(v))),
+                            );
                         }
                     }
                 }
@@ -1708,7 +2006,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             let v = self.cx.render_value(val);
             let us = self.cx.render_type(unsigned_src);
             let dt = self.cx.render_type(dest_ty);
-            self.new_temp_with_stmt(dest_ty, &format!("({dt})({us}){v}"))
+            self.new_temp_with_stmt(dest_ty, CExpr::cast(dt, CExpr::cast(us, CExpr::var(v))))
         } else {
             self.cast(val, dest_ty)
         }

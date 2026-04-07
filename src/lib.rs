@@ -32,6 +32,7 @@ use rustc_span::Symbol;
 mod allocator;
 mod builder;
 mod builtins;
+mod c_ast;
 mod consts;
 mod context;
 mod debuginfo;

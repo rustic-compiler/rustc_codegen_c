@@ -9,6 +9,7 @@ use rustc_middle::ty::{self, Instance};
 use rustc_span::{Span, sym};
 
 use crate::builder::Builder;
+use crate::c_ast::{CBinOp, CExpr, CStmt};
 use crate::context::{CFunclet, DebugLoc, DebugVar};
 use crate::module::BasicBlockId;
 use crate::types::CTypeKind;
@@ -46,7 +47,10 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let v = self.cx.render_value(val);
                 let ty = self.cx.values.borrow().get_type(val);
                 let t = self.cx.render_type(ty);
-                self.emit(format!("*(volatile {t} *){p} = {v};"));
+                self.emit(CStmt::assign(
+                    CExpr::deref(format!("volatile {t} *"), CExpr::var(&p)),
+                    CExpr::var(v),
+                ));
                 Ok(())
             }
             sym::prefetch_read_data
@@ -63,8 +67,13 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let i32_ty = self.cx.type_i32();
                 let result = self.new_temp_with_stmt(
                     i32_ty,
-                    &format!(
-                        "__rust_try((void (*)(void *)){f}, {d}, (void (*)(void *, void *)){c})"
+                    CExpr::call(
+                        CExpr::var("__rust_try"),
+                        vec![
+                            CExpr::cast("void (*)(void *)", CExpr::var(&f)),
+                            CExpr::var(&d),
+                            CExpr::cast("void (*)(void *, void *)", CExpr::var(&c)),
+                        ],
                     ),
                 );
                 self.store(result, result_dest.val.llval, result_dest.val.align);
@@ -88,8 +97,13 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let rhs = self.cx.render_value(args[1].immediate());
                 let len = self.cx.render_value(args[2].immediate());
                 let ret_ty = self.cx.type_i32();
-                let result =
-                    self.new_temp_with_stmt(ret_ty, &format!("memcmp({lhs}, {rhs}, {len})"));
+                let result = self.new_temp_with_stmt(
+                    ret_ty,
+                    CExpr::call(
+                        CExpr::var("memcmp"),
+                        vec![CExpr::var(&lhs), CExpr::var(&rhs), CExpr::var(&len)],
+                    ),
+                );
                 self.store(result, result_dest.val.llval, result_dest.val.align);
                 Ok(())
             }
@@ -148,7 +162,13 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let a = self.cx.render_value(args[0].immediate());
                 let b = self.cx.render_value(args[1].immediate());
                 let ty = self.cx.values.borrow().get_type(args[0].immediate());
-                let result = self.new_temp_with_stmt(ty, &format!("powf({a}, (float){b})"));
+                let result = self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("powf"),
+                        vec![CExpr::var(&a), CExpr::cast("float", CExpr::var(&b))],
+                    ),
+                );
                 self.store(result, result_dest.val.llval, result_dest.val.align);
                 Ok(())
             }
@@ -156,7 +176,13 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let a = self.cx.render_value(args[0].immediate());
                 let b = self.cx.render_value(args[1].immediate());
                 let ty = self.cx.values.borrow().get_type(args[0].immediate());
-                let result = self.new_temp_with_stmt(ty, &format!("pow({a}, (double){b})"));
+                let result = self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("pow"),
+                        vec![CExpr::var(&a), CExpr::cast("double", CExpr::var(&b))],
+                    ),
+                );
                 self.store(result, result_dest.val.llval, result_dest.val.align);
                 Ok(())
             }
@@ -166,7 +192,13 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let b = self.cx.render_value(args[1].immediate());
                 let c = self.cx.render_value(args[2].immediate());
                 let ty = self.cx.values.borrow().get_type(args[0].immediate());
-                let result = self.new_temp_with_stmt(ty, &format!("fmaf({a}, {b}, {c})"));
+                let result = self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("fmaf"),
+                        vec![CExpr::var(&a), CExpr::var(&b), CExpr::var(&c)],
+                    ),
+                );
                 self.store(result, result_dest.val.llval, result_dest.val.align);
                 Ok(())
             }
@@ -175,7 +207,13 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let b = self.cx.render_value(args[1].immediate());
                 let c = self.cx.render_value(args[2].immediate());
                 let ty = self.cx.values.borrow().get_type(args[0].immediate());
-                let result = self.new_temp_with_stmt(ty, &format!("fma({a}, {b}, {c})"));
+                let result = self.new_temp_with_stmt(
+                    ty,
+                    CExpr::call(
+                        CExpr::var("fma"),
+                        vec![CExpr::var(&a), CExpr::var(&b), CExpr::var(&c)],
+                    ),
+                );
                 self.store(result, result_dest.val.llval, result_dest.val.align);
                 Ok(())
             }
@@ -186,8 +224,21 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let layout = self.layout_of(tp_ty);
                 let size = layout.size.bytes();
                 let ret_ty = self.cx.type_i8();
-                let result =
-                    self.new_temp_with_stmt(ret_ty, &format!("memcmp({lhs}, {rhs}, {size}) == 0"));
+                let result = self.new_temp_with_stmt(
+                    ret_ty,
+                    CExpr::binop(
+                        CExpr::call(
+                            CExpr::var("memcmp"),
+                            vec![
+                                CExpr::var(&lhs),
+                                CExpr::var(&rhs),
+                                CExpr::lit(&size.to_string()),
+                            ],
+                        ),
+                        CBinOp::Eq,
+                        CExpr::lit("0"),
+                    ),
+                );
                 self.store(result, result_dest.val.llval, result_dest.val.align);
                 Ok(())
             }
@@ -217,7 +268,14 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let size = result_dest.layout.size;
                 let ptr = result_dest.val.llval;
                 let p = self.cx.render_value(ptr);
-                self.emit(format!("memset({p}, 0, {});", size.bytes()));
+                self.emit(CStmt::expr(CExpr::call(
+                    CExpr::var("memset"),
+                    vec![
+                        CExpr::var(&p),
+                        CExpr::lit("0"),
+                        CExpr::lit(&size.bytes().to_string()),
+                    ],
+                )));
                 Ok(())
             }
             sym::typed_swap_nonoverlapping => codegen_typed_swap(self, instance, args),
@@ -236,7 +294,7 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
     }
 
     fn abort(&mut self) {
-        self.emit("abort();".into());
+        self.emit(CStmt::expr(CExpr::call(CExpr::var("abort"), vec![])));
     }
 
     fn assume(&mut self, _val: ValueRef) {}
@@ -246,7 +304,10 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
         let bool_ty = self.cx.intern_type(CTypeKind::Bool);
         self.new_temp_with_stmt(
             bool_ty,
-            &format!("__builtin_expect({c}, {})", if expected { 1 } else { 0 }),
+            CExpr::call(
+                CExpr::var("__builtin_expect"),
+                vec![CExpr::var(&c), CExpr::lit(if expected { "1" } else { "0" })],
+            ),
         )
     }
 
@@ -260,19 +321,32 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
         let vtable = self.cx.render_value(llvtable);
         self.new_temp_with_stmt(
             ptr_ty,
-            &format!("*(void **)((char *){vtable} + {vtable_byte_offset})"),
+            CExpr::deref(
+                "void **",
+                CExpr::paren(CExpr::binop(
+                    CExpr::cast("char *", CExpr::var(&vtable)),
+                    CBinOp::Add,
+                    CExpr::lit(format!("{vtable_byte_offset}")),
+                )),
+            ),
         )
     }
 
     fn va_start(&mut self, val: ValueRef) -> ValueRef {
         let v = self.cx.render_value(val);
-        self.emit(format!("va_start({v});"));
+        self.emit(CStmt::expr(CExpr::call(
+            CExpr::var("va_start"),
+            vec![CExpr::var(&v)],
+        )));
         val
     }
 
     fn va_end(&mut self, val: ValueRef) -> ValueRef {
         let v = self.cx.render_value(val);
-        self.emit(format!("va_end({v});"));
+        self.emit(CStmt::expr(CExpr::call(
+            CExpr::var("va_end"),
+            vec![CExpr::var(&v)],
+        )));
         val
     }
 }
@@ -327,10 +401,10 @@ impl<'a, 'tcx> AsmBuilderMethods<'tcx> for Builder<'a, 'tcx> {
         _dest: Option<BasicBlockId>,
         _catch_funclet: Option<(BasicBlockId, Option<&CFunclet>)>,
     ) {
-        self.emit("/* inline asm not supported */".into());
+        self.emit(CStmt::raw("/* inline asm not supported */"));
         if let Some(dest) = _dest {
             let label = self.block_label(dest);
-            self.emit(format!("goto {label};"));
+            self.emit(CStmt::goto(label));
         }
     }
 }
@@ -384,7 +458,7 @@ fn codegen_unary_math<'a, 'tcx>(
         (sym::round_ties_even_f64, _) => "rint",
         _ => unreachable!(),
     };
-    let result = bx.new_temp_with_stmt(ty, &format!("{cfn}({v})"));
+    let result = bx.new_temp_with_stmt(ty, CExpr::call(CExpr::var(cfn), vec![CExpr::var(&v)]));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -410,7 +484,10 @@ fn codegen_binary_math<'a, 'tcx>(
         (sym::maxnumf64, _) => "fmax",
         _ => unreachable!(),
     };
-    let result = bx.new_temp_with_stmt(ty, &format!("{cfn}({a}, {b})"));
+    let result = bx.new_temp_with_stmt(
+        ty,
+        CExpr::call(CExpr::var(cfn), vec![CExpr::var(&a), CExpr::var(&b)]),
+    );
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -436,7 +513,7 @@ fn codegen_ctlz<'a, 'tcx>(
                  : 64 + ((unsigned long long)({v}) == 0 ? 64 : __builtin_clzll((unsigned long long)({v}))))"
         )
     };
-    let result = bx.new_temp_with_stmt(ret_ty, &expr);
+    let result = bx.new_temp_with_stmt(ret_ty, CExpr::raw(expr));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -462,7 +539,7 @@ fn codegen_cttz<'a, 'tcx>(
                  : 64 + ((unsigned long long)((unsigned __int128)({v}) >> 64) == 0 ? 64 : __builtin_ctzll((unsigned long long)((unsigned __int128)({v}) >> 64))))"
         )
     };
-    let result = bx.new_temp_with_stmt(ret_ty, &expr);
+    let result = bx.new_temp_with_stmt(ret_ty, CExpr::raw(expr));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -486,7 +563,7 @@ fn codegen_ctpop<'a, 'tcx>(
             "(__builtin_popcountll((unsigned long long)({v})) + __builtin_popcountll((unsigned long long)((unsigned __int128)({v}) >> 64)))"
         )
     };
-    let result = bx.new_temp_with_stmt(ret_ty, &expr);
+    let result = bx.new_temp_with_stmt(ret_ty, CExpr::raw(expr));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -511,7 +588,7 @@ fn codegen_bswap<'a, 'tcx>(
         ),
         _ => format!("{v} /* bswap unsupported for {bits}-bit */"),
     };
-    let result = bx.new_temp_with_stmt(ty, &expr);
+    let result = bx.new_temp_with_stmt(ty, CExpr::raw(expr));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -548,8 +625,8 @@ fn codegen_bitreverse<'a, 'tcx>(
     } else {
         t.clone()
     };
-    bx.emit(format!("{rn} = 0;"));
-    bx.emit(format!("for ({itn} = 0; {itn} < {bits}; {itn}++) {{ {rn} = ({t})((({ut}){rn} << 1) | ((({ut}){v} >> {itn}) & 1)); }}"));
+    bx.emit(CStmt::raw(format!("{rn} = 0;")));
+    bx.emit(CStmt::raw(format!("for ({itn} = 0; {itn} < {bits}; {itn}++) {{ {rn} = ({t})((({ut}){rn} << 1) | ((({ut}){v} >> {itn}) & 1)); }}")));
     bx.store(result_name, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -620,10 +697,12 @@ fn codegen_saturating<'a, 'tcx>(
             format!("({t})0")
         }
     };
-    bx.emit(format!(
+    bx.emit(CStmt::raw(format!(
         "{overflow_name} = {builtin}({l}, {r}, &{result_name});"
-    ));
-    bx.emit(format!("if ({overflow_name}) {result_name} = {clamp};"));
+    )));
+    bx.emit(CStmt::raw(format!(
+        "if ({overflow_name}) {result_name} = {clamp};"
+    )));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -651,7 +730,7 @@ fn codegen_rotate<'a, 'tcx>(
     } else {
         format!("({t})(({ut}){v} >> ({s} % {bits}) | ({ut}){v} << (({bits} - {s}) % {bits}))")
     };
-    let result = bx.new_temp_with_stmt(ty, &expr);
+    let result = bx.new_temp_with_stmt(ty, CExpr::raw(expr));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -681,7 +760,7 @@ fn codegen_funnel_shift<'a, 'tcx>(
     } else {
         format!("({t})((({ut}){va} >> {vs}) | (({ut}){vb} << ({bits} - {vs})))")
     };
-    let result = bx.new_temp_with_stmt(ty, &expr);
+    let result = bx.new_temp_with_stmt(ty, CExpr::raw(expr));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -707,7 +786,7 @@ fn codegen_simd_extract<'a, 'tcx>(
             _ => ret_ty,
         }
     };
-    let result = bx.new_temp_with_stmt(elem_ty, &format!("{v}[{i}]"));
+    let result = bx.new_temp_with_stmt(elem_ty, CExpr::index(CExpr::var(&v), CExpr::var(&i)));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -732,7 +811,7 @@ fn codegen_simd_cmp<'a, 'tcx>(
         _ => unreachable!(),
     };
     let a_ty = bx.cx.values.borrow().get_type(a);
-    let result = bx.new_temp_with_stmt(a_ty, &format!("{va} {c_op} {vb}"));
+    let result = bx.new_temp_with_stmt(a_ty, CExpr::raw(format!("{va} {c_op} {vb}")));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -754,7 +833,7 @@ fn codegen_simd_bitwise<'a, 'tcx>(
         _ => unreachable!(),
     };
     let a_ty = bx.cx.values.borrow().get_type(a);
-    let result = bx.new_temp_with_stmt(a_ty, &format!("{va} {c_op} {vb}"));
+    let result = bx.new_temp_with_stmt(a_ty, CExpr::raw(format!("{va} {c_op} {vb}")));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -771,7 +850,7 @@ fn codegen_simd_shift<'a, 'tcx>(
     let vb = bx.cx.render_value(b);
     let c_op = if name == sym::simd_shl { "<<" } else { ">>" };
     let a_ty = bx.cx.values.borrow().get_type(a);
-    let result = bx.new_temp_with_stmt(a_ty, &format!("{va} {c_op} {vb}"));
+    let result = bx.new_temp_with_stmt(a_ty, CExpr::raw(format!("{va} {c_op} {vb}")));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -788,9 +867,12 @@ fn codegen_simd_insert<'a, 'tcx>(
     let i = bx.cx.render_value(idx);
     let e = bx.cx.render_value(val);
     let vec_ty = bx.cx.values.borrow().get_type(vec);
-    let result = bx.new_temp_with_stmt(vec_ty, &v);
+    let result = bx.new_temp_with_stmt(vec_ty, CExpr::raw(v));
     let rn = bx.cx.render_value(result);
-    bx.emit(format!("{rn}[{i}] = {e};"));
+    bx.emit(CStmt::assign(
+        CExpr::index(CExpr::var(&rn), CExpr::var(&i)),
+        CExpr::var(&e),
+    ));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -805,7 +887,13 @@ fn codegen_simd_cast<'a, 'tcx>(
     let ret_layout = result_dest.layout;
     let ret_ty = bx.cx.backend_type(ret_layout);
     let ret_t = bx.cx.render_type(ret_ty);
-    let result = bx.new_temp_with_stmt(ret_ty, &format!("__builtin_convertvector({va}, {ret_t})"));
+    let result = bx.new_temp_with_stmt(
+        ret_ty,
+        CExpr::call(
+            CExpr::var("__builtin_convertvector"),
+            vec![CExpr::var(&va), CExpr::raw(ret_t)],
+        ),
+    );
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -850,12 +938,12 @@ fn codegen_simd_shuffle<'a, 'tcx>(
             func.add_local_decl(format!("{elem_t} {arr_name}[{total_len}];"));
         }
     }
-    bx.emit(format!(
+    bx.emit(CStmt::raw(format!(
         "memcpy(&{arr_name}[0], &{v1}, {in_len} * sizeof({elem_t}));"
-    ));
-    bx.emit(format!(
+    )));
+    bx.emit(CStmt::raw(format!(
         "memcpy(&{arr_name}[{in_len}], &{v2}, {in_len} * sizeof({elem_t}));"
-    ));
+    )));
 
     let index_vals: Vec<u64> = {
         let vals = bx.cx.values.borrow();
@@ -878,7 +966,10 @@ fn codegen_simd_shuffle<'a, 'tcx>(
         }
     }
     for (i, &idx_val) in index_vals.iter().enumerate() {
-        bx.emit(format!("{rn}[{i}] = {arr_name}[{idx_val}];"));
+        bx.emit(CStmt::assign(
+            CExpr::index(CExpr::var(&rn), CExpr::lit(&i.to_string())),
+            CExpr::index(CExpr::var(&arr_name), CExpr::lit(&idx_val.to_string())),
+        ));
     }
 
     bx.store(result, result_dest.val.llval, result_dest.val.align);
@@ -896,13 +987,13 @@ fn codegen_typed_swap<'a, 'tcx>(
     let align = pointee_layout.align.abi;
     let x = bx.cx.render_value(args[0].immediate());
     let y = bx.cx.render_value(args[1].immediate());
-    bx.emit(format!(
+    bx.emit(CStmt::raw(format!(
         "{{ _Alignas({}) unsigned char _swap_tmp[{size}];",
         align.bytes()
-    ));
-    bx.emit(format!("  memcpy(_swap_tmp, {x}, {size});"));
-    bx.emit(format!("  memcpy({x}, {y}, {size});"));
-    bx.emit(format!("  memcpy({y}, _swap_tmp, {size}); }}"));
+    )));
+    bx.emit(CStmt::raw(format!("  memcpy(_swap_tmp, {x}, {size});")));
+    bx.emit(CStmt::raw(format!("  memcpy({x}, {y}, {size});")));
+    bx.emit(CStmt::raw(format!("  memcpy({y}, _swap_tmp, {size}); }}")));
     Ok(())
 }
 
@@ -938,55 +1029,83 @@ fn codegen_carrying_mul_add<'a, 'tcx>(
         });
         let wide = bx.new_temp_with_stmt(
             wide_ty,
-            &format!("({wide_t}){a} * ({wide_t}){b} + ({wide_t}){c} + ({wide_t}){d}"),
+            CExpr::raw(format!(
+                "({wide_t}){a} * ({wide_t}){b} + ({wide_t}){c} + ({wide_t}){d}"
+            )),
         );
         let wide_v = bx.cx.render_value(wide);
-        let low = bx.new_temp_with_stmt(narrow_ty, &format!("({narrow_t}){wide_v}"));
+        let low = bx.new_temp_with_stmt(narrow_ty, CExpr::cast(&narrow_t, CExpr::var(&wide_v)));
         let high = bx.new_temp_with_stmt(
             narrow_ty,
-            &format!("({narrow_t})(({wide_t}){wide_v} >> {bits})"),
+            CExpr::raw(format!("({narrow_t})(({wide_t}){wide_v} >> {bits})")),
         );
         let low_v = bx.cx.render_value(low);
         let high_v = bx.cx.render_value(high);
-        bx.emit(format!("*(({narrow_t} *){dest}) = {low_v};"));
-        bx.emit(format!(
-            "*(({narrow_t} *)((char *){dest} + {})) = {high_v};",
-            size.bytes()
+        bx.emit(CStmt::assign(
+            CExpr::deref(format!("{narrow_t} *"), CExpr::var(&dest)),
+            CExpr::var(&low_v),
+        ));
+        bx.emit(CStmt::assign(
+            CExpr::deref(
+                format!("{narrow_t} *"),
+                CExpr::paren(CExpr::binop(
+                    CExpr::cast("char *", CExpr::var(&dest)),
+                    CBinOp::Add,
+                    CExpr::lit(format!("{}", size.bytes())),
+                )),
+            ),
+            CExpr::var(&high_v),
         ));
     } else {
         let t = if signed { "int128_t" } else { "uint128_t" };
-        bx.emit(format!("{{ /* carrying_mul_add u128 */"));
-        bx.emit(format!("  uint64_t _a_lo = (uint64_t){a};"));
-        bx.emit(format!(
+        bx.emit(CStmt::raw(format!("{{ /* carrying_mul_add u128 */")));
+        bx.emit(CStmt::raw(format!("  uint64_t _a_lo = (uint64_t){a};")));
+        bx.emit(CStmt::raw(format!(
             "  uint64_t _a_hi = (uint64_t)((uint128_t){a} >> 64);"
-        ));
-        bx.emit(format!("  uint64_t _b_lo = (uint64_t){b};"));
-        bx.emit(format!(
+        )));
+        bx.emit(CStmt::raw(format!("  uint64_t _b_lo = (uint64_t){b};")));
+        bx.emit(CStmt::raw(format!(
             "  uint64_t _b_hi = (uint64_t)((uint128_t){b} >> 64);"
-        ));
-        bx.emit(format!("  uint128_t _lo_lo = (uint128_t)_a_lo * _b_lo;"));
-        bx.emit(format!("  uint128_t _hi_lo = (uint128_t)_a_hi * _b_lo;"));
-        bx.emit(format!("  uint128_t _lo_hi = (uint128_t)_a_lo * _b_hi;"));
-        bx.emit(format!("  uint128_t _hi_hi = (uint128_t)_a_hi * _b_hi;"));
-        bx.emit(format!("  uint128_t _mid = _hi_lo + _lo_hi;"));
-        bx.emit(format!(
+        )));
+        bx.emit(CStmt::raw(format!(
+            "  uint128_t _lo_lo = (uint128_t)_a_lo * _b_lo;"
+        )));
+        bx.emit(CStmt::raw(format!(
+            "  uint128_t _hi_lo = (uint128_t)_a_hi * _b_lo;"
+        )));
+        bx.emit(CStmt::raw(format!(
+            "  uint128_t _lo_hi = (uint128_t)_a_lo * _b_hi;"
+        )));
+        bx.emit(CStmt::raw(format!(
+            "  uint128_t _hi_hi = (uint128_t)_a_hi * _b_hi;"
+        )));
+        bx.emit(CStmt::raw(format!("  uint128_t _mid = _hi_lo + _lo_hi;")));
+        bx.emit(CStmt::raw(format!(
             "  uint128_t _carry_mid = (_mid < _hi_lo) ? ((uint128_t)1 << 64) : 0;"
-        ));
-        bx.emit(format!("  uint128_t _low = _lo_lo + (_mid << 64);"));
-        bx.emit(format!("  uint128_t _carry_low = (_low < _lo_lo) ? 1 : 0;"));
-        bx.emit(format!(
+        )));
+        bx.emit(CStmt::raw(format!(
+            "  uint128_t _low = _lo_lo + (_mid << 64);"
+        )));
+        bx.emit(CStmt::raw(format!(
+            "  uint128_t _carry_low = (_low < _lo_lo) ? 1 : 0;"
+        )));
+        bx.emit(CStmt::raw(format!(
             "  uint128_t _high = _hi_hi + (_mid >> 64) + _carry_mid + _carry_low;"
-        ));
-        bx.emit(format!("  _low += (uint128_t){c};"));
-        bx.emit(format!("  if (_low < (uint128_t){c}) _high += 1;"));
-        bx.emit(format!("  _low += (uint128_t){d};"));
-        bx.emit(format!("  if (_low < (uint128_t){d}) _high += 1;"));
-        bx.emit(format!("  *(({t} *){dest}) = ({t})_low;"));
-        bx.emit(format!(
+        )));
+        bx.emit(CStmt::raw(format!("  _low += (uint128_t){c};")));
+        bx.emit(CStmt::raw(format!(
+            "  if (_low < (uint128_t){c}) _high += 1;"
+        )));
+        bx.emit(CStmt::raw(format!("  _low += (uint128_t){d};")));
+        bx.emit(CStmt::raw(format!(
+            "  if (_low < (uint128_t){d}) _high += 1;"
+        )));
+        bx.emit(CStmt::raw(format!("  *(({t} *){dest}) = ({t})_low;")));
+        bx.emit(CStmt::raw(format!(
             "  *(({t} *)((char *){dest} + {})) = ({t})_high;",
             size.bytes()
-        ));
-        bx.emit(format!("}}"));
+        )));
+        bx.emit(CStmt::raw(format!("}}")));
     }
     Ok(())
 }
