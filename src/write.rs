@@ -47,9 +47,11 @@ pub(crate) fn codegen(
         .arg("-fno-strict-aliasing") // generated code uses type-punned pointer access
         .arg("-funwind-tables") // emit .eh_frame so the unwinder can walk through C-compiled
         // frames (required for proc macros loaded into the compiler)
-        .arg("-fno-stack-protector"); // disable stack protector for generated code -- the C
-    // backend may generate patterns that trip the canary
-    // without actual corruption (e.g. aggregate stores)
+        .arg("-fno-stack-protector") // disable stack protector for generated code -- the C
+        // backend may generate patterns that trip the canary
+        // without actual corruption (e.g. aggregate stores)
+        .arg("-ffunction-sections") // put each function in its own section so --gc-sections
+        .arg("-fdata-sections"); // can strip unreachable code/data at link time
 
     // -fPIC: skip for MSVC-like compilers where it's not applicable
     let cc_lower = cc.to_lowercase();

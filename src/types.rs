@@ -181,9 +181,7 @@ impl TypeStore {
                     CTypeKind::Ptr => "uintptr_t".to_string(),
                     _ => self.render(*element),
                 };
-                format!(
-                    "{elem_str} __attribute__((vector_size({len} * sizeof({elem_str}))))"
-                )
+                format!("{elem_str} __attribute__((vector_size({len} * sizeof({elem_str}))))")
             }
         }
     }

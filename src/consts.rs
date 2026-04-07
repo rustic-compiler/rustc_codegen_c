@@ -160,12 +160,14 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
                         format!("(void *)(uintptr_t)((unsigned __int128){hi}ULL << 64 | {lo}ULL)")
                     };
                     self.intern_value(CValueKind::InlineExpr(expr), llty)
-                } else if matches!(layout.primitive(), rustc_abi::Primitive::Float(f) if f.size().bits() == 32) {
+                } else if matches!(layout.primitive(), rustc_abi::Primitive::Float(f) if f.size().bits() == 32)
+                {
                     // f32 scalar: reinterpret the raw bits as an f32, then
                     // promote to f64 for the FloatConst representation.
                     let f = f32::from_bits(data as u32);
                     self.intern_value(CValueKind::FloatConst(f as f64), llty)
-                } else if matches!(layout.primitive(), rustc_abi::Primitive::Float(f) if f.size().bits() == 64) {
+                } else if matches!(layout.primitive(), rustc_abi::Primitive::Float(f) if f.size().bits() == 64)
+                {
                     // f64 scalar: reinterpret the raw bits as an f64.
                     let f = f64::from_bits(data as u64);
                     self.intern_value(CValueKind::FloatConst(f), llty)
@@ -324,8 +326,14 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
             // No relocations -- emit as simple byte array
             let data = init.get_bytes_unchecked(interpret::alloc_range(Size::ZERO, init.size()));
             let hex: Vec<_> = data.iter().map(|b| format!("0x{b:02x}")).collect();
+            let align = init.align.bytes();
+            let align_attr = if align > 1 {
+                format!("_Alignas({align}) ")
+            } else {
+                String::new()
+            };
             let decl = format!(
-                "static const unsigned char {name}[] = {{ {} }};",
+                "{align_attr}static const unsigned char {name}[] = {{ {} }};",
                 hex.join(", ")
             );
             self.module.borrow_mut().data_sections.push(decl);
@@ -487,6 +495,9 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
             let has_relocs = !provenance.ptrs().is_empty();
             let alloc_len = init.len();
 
+            // Use the allocation's actual alignment (not just pointer_size).
+            // Types with #[repr(align(N))] need N-byte alignment.
+            let actual_align = init.align.bytes().max(pointer_size as u64);
             if alloc_len == 0 {
                 // Zero-size static
                 format!("{tls}uint8_t {c_name}[0]{asm};")
@@ -496,7 +507,7 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
                     init.get_bytes_unchecked(interpret::alloc_range(Size::ZERO, init.size()));
                 let hex: Vec<_> = data.iter().map(|b| format!("0x{b:02x}")).collect();
                 format!(
-                    "_Alignas({pointer_size}) {tls}uint8_t {c_name}[{alloc_len}]{asm} = {{ {} }};",
+                    "_Alignas({actual_align}) {tls}uint8_t {c_name}[{alloc_len}]{asm} = {{ {} }};",
                     hex.join(", ")
                 )
             } else {
@@ -624,6 +635,34 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
             let c_ty = crate::type_of::layout_to_c_type(self, layout);
             let type_decl = self.render_type_decl(c_ty, &c_name);
             format!("{tls}{type_decl}{asm};")
+        };
+
+        // Add link_section attribute if specified (e.g. .init_array for
+        // pre-main constructors).
+        let attrs = self.tcx.codegen_fn_attrs(def_id);
+        let decl = if let Some(section) = attrs.link_section {
+            let sect = section.as_str();
+            format!("__attribute__((section(\"{sect}\"))) {decl}")
+        } else {
+            decl
+        };
+
+        // Add alignment attribute if the static has a specified alignment
+        // override (e.g. #[rustc_align_static(N)]).
+        let decl = if let Some(align) = attrs.alignment {
+            format!("__attribute__((aligned({}))) {decl}", align.bytes())
+        } else {
+            decl
+        };
+
+        // #[used] / #[used(compiler)] — prevent linker GC from discarding.
+        use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+        let decl = if attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
+            || attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER)
+        {
+            format!("__attribute__((used)) {decl}")
+        } else {
+            decl
         };
 
         // Push the definition and register in declared_globals to prevent

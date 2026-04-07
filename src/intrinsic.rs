@@ -80,13 +80,8 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 let list = args[0].immediate();
                 let l = self.cx.render_value(list);
                 // va_arg is a macro: va_arg(*(va_list*)ptr, type)
-                let expr_str = format!(
-                    "va_arg(*(va_list *){l}, {result_ty_str})"
-                );
-                let val = self.new_temp_with_stmt(
-                    result_ty,
-                    CExpr::raw(expr_str),
-                );
+                let expr_str = format!("va_arg(*(va_list *){l}, {result_ty_str})");
+                let val = self.new_temp_with_stmt(result_ty, CExpr::raw(expr_str));
                 self.store(val, result_dest.val.llval, result_dest.val.align);
                 Ok(())
             }
@@ -370,18 +365,14 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
         // va_start takes a va_list and the last named parameter.
         // val is a pointer to a va_list, so dereference it.
         // Use 0 as dummy last-param (GCC/Clang accept this).
-        self.emit(CStmt::raw(format!(
-            "va_start(*(va_list *){v}, 0);"
-        )));
+        self.emit(CStmt::raw(format!("va_start(*(va_list *){v}, 0);")));
         val
     }
 
     fn va_end(&mut self, val: ValueRef) -> ValueRef {
         let v = self.cx.render_value(val);
         // val is a pointer to a va_list, so dereference it.
-        self.emit(CStmt::raw(format!(
-            "va_end(*(va_list *){v});"
-        )));
+        self.emit(CStmt::raw(format!("va_end(*(va_list *){v});")));
         val
     }
 }
@@ -537,7 +528,14 @@ fn codegen_ctlz<'a, 'tcx>(
     let ty = bx.cx.values.borrow().get_type(val);
     let bits = bx.cx.int_width(ty);
     let ret_ty = bx.cx.type_i32();
-    let expr = if bits <= 32 {
+    // For sub-32-bit signed types, casting to (unsigned int) sign-extends
+    // (e.g. (unsigned int)(-1i8) == 0xFFFFFFFF). Mask to the correct width.
+    let expr = if bits < 32 {
+        let mask = (1u64 << bits) - 1;
+        format!(
+            "({v} == 0 ? {bits} : __builtin_clz((unsigned int)({v}) & {mask}U) - (32 - {bits}))"
+        )
+    } else if bits <= 32 {
         format!("({v} == 0 ? {bits} : __builtin_clz((unsigned int){v}) - (32 - {bits}))")
     } else if bits <= 64 {
         format!("({v} == 0 ? {bits} : __builtin_clzll((unsigned long long){v}) - (64 - {bits}))")
@@ -589,7 +587,13 @@ fn codegen_ctpop<'a, 'tcx>(
     let ty = bx.cx.values.borrow().get_type(val);
     let bits = bx.cx.int_width(ty);
     let ret_ty = bx.cx.type_i32();
-    let expr = if bits <= 32 {
+    // For sub-32-bit signed types, casting to (unsigned int) sign-extends
+    // (e.g. (unsigned int)(-1i8) == 0xFFFFFFFF, popcount 32 instead of 8).
+    // Mask to the correct width first.
+    let expr = if bits < 32 {
+        let mask = (1u64 << bits) - 1;
+        format!("__builtin_popcount((unsigned int)({v}) & {mask}U)")
+    } else if bits == 32 {
         format!("__builtin_popcount((unsigned int){v})")
     } else if bits <= 64 {
         format!("__builtin_popcountll((unsigned long long){v})")

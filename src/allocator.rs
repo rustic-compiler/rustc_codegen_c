@@ -111,9 +111,14 @@ fn emit_aligned_alloc_helpers(module: &mut CModule) {
 /// override of `_Unwind_RaiseException` that initiates longjmp-based
 /// unwinding instead of DWARF-based unwinding.
 fn emit_unwind_infrastructure(module: &mut CModule) {
-    // __rustc_setjmp, __rustc_longjmp, and __rustc_unwind_chain are
-    // emitted as weak definitions in every module's preamble (see
-    // module.rs to_c_source).
+    // __rustc_setjmp, __rustc_longjmp are macros defined in the preamble.
+    // __rustc_unwind_chain is extern-declared in the preamble; its single
+    // definition with default visibility lives here so that all codegen
+    // units (including those in libstd.so) share one TLS slot.
+    module.function_defs.push(
+        "__attribute__((visibility(\"default\"))) __thread struct __rustc_unwind_context *__rustc_unwind_chain;\n"
+            .to_string(),
+    );
 
     // Override _Unwind_RaiseException: longjmp to the innermost
     // invoke/try handler instead of DWARF-based stack unwinding.

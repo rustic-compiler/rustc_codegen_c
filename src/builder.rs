@@ -1981,24 +1981,39 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             funclet,
             callee_instance,
         );
-        // Tail call: return the result immediately
-        let ret_ty = {
-            let values = self.cx.values.borrow();
-            if let Some(sig) = values.get_fn_sig(llfn) {
-                let types = self.cx.types.borrow();
-                match types.get(sig) {
-                    CTypeKind::Function { ret, .. } => *ret,
-                    _ => self.cx.intern_type(CTypeKind::Void),
-                }
-            } else {
-                self.cx.intern_type(CTypeKind::Void)
-            }
+        // Tail call: return the result immediately.
+        // If the current function uses indirect return (sret), call()
+        // already stored the callee's result into _retbuf via the sret
+        // pointer.  ret_void() emits `return _retbuf;` which is correct.
+        let has_retbuf = {
+            let module = self.cx.module.borrow();
+            module
+                .open_functions
+                .get(&self.current_fn)
+                .and_then(|f| f.retbuf_name.clone())
+                .is_some()
         };
-        let is_void = matches!(self.cx.types.borrow().get(ret_ty), CTypeKind::Void);
-        if is_void {
+        if has_retbuf {
             self.ret_void();
         } else {
-            self.ret(result);
+            let ret_ty = {
+                let values = self.cx.values.borrow();
+                if let Some(sig) = values.get_fn_sig(llfn) {
+                    let types = self.cx.types.borrow();
+                    match types.get(sig) {
+                        CTypeKind::Function { ret, .. } => *ret,
+                        _ => self.cx.intern_type(CTypeKind::Void),
+                    }
+                } else {
+                    self.cx.intern_type(CTypeKind::Void)
+                }
+            };
+            let is_void = matches!(self.cx.types.borrow().get(ret_ty), CTypeKind::Void);
+            if is_void {
+                self.ret_void();
+            } else {
+                self.ret(result);
+            }
         }
     }
 

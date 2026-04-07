@@ -144,6 +144,8 @@ impl CodegenBackend for CCodegenBackend {
         TargetConfig {
             target_features,
             unstable_target_features,
+            // Keep false: enabling these changes what stdlib code gets
+            // compiled, and the C backend can't codegen all f16/f128 ops.
             has_reliable_f16: false,
             has_reliable_f16_math: false,
             has_reliable_f128: false,
@@ -300,17 +302,36 @@ impl WriteBackendMethods for CCodegenBackend {
         _each_linked_rlib_for_lto: &[PathBuf],
         modules: Vec<FatLtoInput<Self>>,
     ) -> ModuleCodegen<Self::Module> {
-        // Fat LTO: just use the first module
-        modules
-            .into_iter()
-            .next()
-            .map(|input| match input {
-                FatLtoInput::Serialized { .. } => {
-                    panic!("serialized LTO not supported by C backend")
+        // Fat LTO: generate C source for each module and concatenate.
+        // Each module has an identical preamble; we include the first
+        // module's full source and wrap subsequent modules with an
+        // #ifndef guard to skip their duplicate preamble.
+        let mut sources: Vec<String> = Vec::new();
+        let mut base: Option<ModuleCodegen<CModule>> = None;
+        for input in modules {
+            match input {
+                FatLtoInput::InMemory(m) => {
+                    sources.push(m.module_llvm.to_c_source());
+                    if base.is_none() {
+                        base = Some(m);
+                    }
                 }
-                FatLtoInput::InMemory(m) => m,
-            })
-            .expect("no modules for fat LTO")
+                FatLtoInput::Serialized { name: _, buffer } => {
+                    let src = std::str::from_utf8(buffer.data())
+                        .unwrap_or("/* invalid UTF-8 */")
+                        .to_string();
+                    sources.push(src);
+                }
+            }
+        }
+        let mut base = base.expect("no modules for fat LTO");
+        // Concatenate all sources. The preamble includes the same
+        // typedefs/macros in every module; static inline functions
+        // and struct definitions may differ, so we include everything
+        // and rely on GCC/Clang accepting benign redefinitions.
+        let combined = sources.join("\n/* --- fat LTO module boundary --- */\n");
+        base.module_llvm.precompiled_source = Some(combined);
+        base
     }
 
     fn run_thin_lto(

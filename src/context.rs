@@ -141,9 +141,12 @@ impl<'tcx> CodegenCx<'tcx> {
             return;
         }
 
-        // Check if this is a same-CGU static that will have relocations
+        // Check if this is a same-CGU static that will have relocations.
+        // Guard against foreign items (extern statics with no body):
+        // eval_static_initializer would ICE on those.
         let is_same_cgu = self.module.borrow().declared_globals.contains(c_name);
         let has_relocs = is_same_cgu
+            && !self.tcx.is_foreign_item(def_id)
             && self
                 .tcx
                 .eval_static_initializer(def_id)
@@ -276,11 +279,11 @@ impl<'tcx> rustc_abi::HasDataLayout for CodegenCx<'tcx> {
 impl<'tcx> LayoutOfHelpers<'tcx> for CodegenCx<'tcx> {
     fn handle_layout_err(&self, err: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
         if let LayoutError::SizeOverflow(_) | LayoutError::ReferencesError(_) = err {
-            self.tcx.dcx().span_fatal(span, format!("{err:?}"))
+            self.tcx.dcx().span_fatal(span, format!("{err}"))
         } else {
             self.tcx
                 .dcx()
-                .span_fatal(span, format!("failed to get layout for `{ty}`: {err:?}"))
+                .span_fatal(span, format!("failed to get layout for `{ty}`: {err}"))
         }
     }
 }
@@ -338,10 +341,10 @@ impl<'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx> {
         let (params, is_variadic) = {
             let types = self.types.borrow();
             match types.get(fn_ty) {
-                CTypeKind::Function {
-                    args, variadic, ..
-                } => (
-                    args.iter().map(|a| self.render_type(*a)).collect::<Vec<_>>(),
+                CTypeKind::Function { args, variadic, .. } => (
+                    args.iter()
+                        .map(|a| self.render_type(*a))
+                        .collect::<Vec<_>>(),
                     *variadic,
                 ),
                 _ => (vec![], false),
@@ -543,7 +546,11 @@ impl<'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx> {
             .collect();
         let is_variadic = fn_abi.c_variadic;
         let mut params_joined = if params_str.is_empty() {
-            if is_variadic { "".to_string() } else { "void".to_string() }
+            if is_variadic {
+                "".to_string()
+            } else {
+                "void".to_string()
+            }
         } else {
             params_str.join(", ")
         };
