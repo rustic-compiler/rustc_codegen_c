@@ -49,6 +49,8 @@ pub struct FunctionDef {
     /// Used for `main(int, char **)` where the second param must be
     /// `char **` rather than the generic `void *`.
     pub param_type_overrides: BTreeMap<usize, String>,
+    /// Whether this function is C-variadic.
+    pub is_variadic: bool,
 }
 
 impl FunctionDef {
@@ -66,6 +68,7 @@ impl FunctionDef {
             retbuf_name: None,
             invoke_counter: 0,
             param_type_overrides: BTreeMap::new(),
+            is_variadic: false,
         }
     }
 
@@ -116,11 +119,17 @@ impl FunctionDef {
                 }
             })
             .collect();
-        let params_joined = if params_str.is_empty() {
-            "void".to_string()
+        let mut params_joined = if params_str.is_empty() {
+            if self.is_variadic { "".to_string() } else { "void".to_string() }
         } else {
             params_str.join(", ")
         };
+        if self.is_variadic {
+            if !params_joined.is_empty() {
+                params_joined.push_str(", ");
+            }
+            params_joined.push_str("...");
+        }
 
         let _ = writeln!(
             s,
@@ -214,7 +223,7 @@ impl CModule {
             declared_fns: [
                 // Pre-populate with functions declared in the preamble
                 // to prevent get_fn from emitting conflicting declarations.
-                "memcpy", "memset", "memmove", "abort",
+                "memcpy", "memset", "memmove", "abort", "__rust_try",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -264,13 +273,13 @@ impl CModule {
         s.push_str("#include <stdbool.h>\n");
         s.push_str("#include <stddef.h>\n");
         s.push_str("#include <math.h>\n");
+        s.push_str("#include <stdarg.h>\n");
         s.push_str("#include <stdatomic.h>\n");
         s.push_str("void *memcpy(void *, const void *, size_t);\n");
         s.push_str("void *memset(void *, int, size_t);\n");
         s.push_str("void *memmove(void *, const void *, size_t);\n");
         s.push_str("int memcmp(const void *, const void *, size_t);\n");
         s.push_str("void abort(void);\n");
-        s.push_str("int __rust_try(void (*)(void *), void *, void (*)(void *, void *));\n");
         // setjmp/longjmp-based unwind context for invoke/resume/catch_unwind.
         // Uses standard C setjmp/longjmp for full architecture portability.
         s.push_str("#include <setjmp.h>\n");
@@ -289,8 +298,28 @@ impl CModule {
         // in every module lets the linker merge them into one per link
         // unit.
         s.push_str(
-            "__attribute__((weak)) __thread struct __rustc_unwind_context *__rustc_unwind_chain;\n\n",
+            "__attribute__((weak)) __thread struct __rustc_unwind_context *__rustc_unwind_chain;\n",
         );
+        // Weak definition of __rust_try so that binary crates linking
+        // dynamically against std can resolve this symbol from their own
+        // object files. The allocator module emits a strong definition that
+        // takes precedence when statically linked.
+        s.push_str("__attribute__((weak)) int __rust_try(void (*try_fn)(void *), void *data, void (*catch_fn)(void *, void *)) {\n");
+        s.push_str("  struct __rustc_unwind_context __ctx;\n");
+        s.push_str("  __ctx.prev = __rustc_unwind_chain;\n");
+        s.push_str("  __ctx.exception_ptr = (void *)0;\n");
+        s.push_str("  __rustc_unwind_chain = &__ctx;\n");
+        s.push_str("  if (__rustc_setjmp(__ctx.buf) == 0) {\n");
+        s.push_str("    try_fn(data);\n");
+        s.push_str("    __rustc_unwind_chain = __ctx.prev;\n");
+        s.push_str("    return 0;\n");
+        s.push_str("  } else {\n");
+        s.push_str("    void *__exn = __ctx.exception_ptr;\n");
+        s.push_str("    __rustc_unwind_chain = __ctx.prev;\n");
+        s.push_str("    catch_fn(data, __exn);\n");
+        s.push_str("    return 1;\n");
+        s.push_str("  }\n");
+        s.push_str("}\n\n");
 
         // 128-bit integer support (GCC/Clang extension)
         s.push_str("#ifdef __SIZEOF_INT128__\n");
@@ -315,11 +344,16 @@ impl CModule {
         s.push_str("#endif\n");
         s.push_str("#ifndef __FLT128_MAX__\n");
         s.push_str("#ifdef __clang__\n");
-        s.push_str("#if __is_identifier(__float128)\n");
-        s.push_str("typedef long double __float128; /* fallback: reduced precision */\n");
+        s.push_str("#if __is_identifier(_Float128)\n");
+        s.push_str("typedef long double _Float128; /* fallback: reduced precision */\n");
         s.push_str("#endif\n");
         s.push_str("#else\n");
-        s.push_str("typedef long double __float128; /* fallback: reduced precision */\n");
+        s.push_str("/* GCC: _Float128 is a builtin on x86_64; on other arches, fall back */\n");
+        s.push_str("#ifndef __SIZEOF_FLOAT128__\n");
+        s.push_str("#if !defined(__x86_64__) && !defined(__i386__)\n");
+        s.push_str("typedef long double _Float128; /* fallback: reduced precision */\n");
+        s.push_str("#endif\n");
+        s.push_str("#endif\n");
         s.push_str("#endif\n");
         s.push_str("#endif\n\n");
 

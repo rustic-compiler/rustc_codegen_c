@@ -155,7 +155,14 @@ impl ValueStore {
                 } else if f.is_infinite() {
                     if *f > 0.0 { "INFINITY" } else { "(-INFINITY)" }.into()
                 } else {
-                    format!("{f}")
+                    // Ensure float literals always have a decimal point so C
+                    // interprets them as floating-point, not integer.
+                    let s = format!("{f}");
+                    if s.contains('.') || s.contains('e') || s.contains('E') {
+                        s
+                    } else {
+                        format!("{s}.0")
+                    }
                 }
             }
             CValueKind::BoolConst(b) => if *b { "1" } else { "0" }.into(),

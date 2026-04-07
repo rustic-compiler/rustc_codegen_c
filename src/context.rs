@@ -219,7 +219,7 @@ impl<'tcx> CodegenCx<'tcx> {
         let asm = Self::asm_label(original_name, c_name);
         module.add_global_decl(
             c_name,
-            format!("{tls}extern struct {struct_name} {c_name}{asm};"),
+            format!("extern {tls}struct {struct_name} {c_name}{asm};"),
         );
     }
 }
@@ -332,32 +332,34 @@ impl<'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx> {
         let ret_ty = crate::type_of::fn_abi_ret_type(self, fn_abi);
         let ret_str = self.render_type(ret_ty);
         let asm = Self::asm_label(&sym, &c_name);
-        let is_rust_mangled = c_name.starts_with("_R")
-            || c_name.starts_with("_ZN")
-            || c_name.starts_with("__rust")
-            || c_name.starts_with("__rdl_");
-        let decl = if is_rust_mangled {
-            // Rust-mangled: emit full typed parameters.
-            let params: Vec<String> = {
-                let types = self.types.borrow();
-                match types.get(fn_ty) {
-                    CTypeKind::Function { args, .. } => {
-                        args.iter().map(|a| self.render_type(*a)).collect()
-                    }
-                    _ => vec![],
-                }
-            };
-            let params_str = if params.is_empty() {
-                "void".to_string()
-            } else {
-                params.join(", ")
-            };
-            format!("{ret_str} {c_name}({params_str}){asm};")
-        } else {
-            // C FFI: use old-style declaration (unspecified params) to handle
-            // variadic functions and avoid signature conflicts.
-            format!("{ret_str} {c_name}(){asm};")
+        // Emit full typed parameter declarations for all functions.
+        // This ensures the C compiler knows the correct ABI for each
+        // parameter (e.g., float in FP registers vs integer in GP registers).
+        let (params, is_variadic) = {
+            let types = self.types.borrow();
+            match types.get(fn_ty) {
+                CTypeKind::Function {
+                    args, variadic, ..
+                } => (
+                    args.iter().map(|a| self.render_type(*a)).collect::<Vec<_>>(),
+                    *variadic,
+                ),
+                _ => (vec![], false),
+            }
         };
+        let mut params_str = if params.is_empty() {
+            "void".to_string()
+        } else {
+            params.join(", ")
+        };
+        if is_variadic {
+            if params.is_empty() {
+                params_str = "...".to_string();
+            } else {
+                params_str.push_str(", ...");
+            }
+        }
+        let decl = format!("{ret_str} {c_name}({params_str}){asm};");
         {
             let mut module = self.module.borrow_mut();
             if module.declared_fns.insert(c_name.clone()) {
@@ -539,11 +541,18 @@ impl<'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx> {
             .iter()
             .map(|(ty, _)| self.render_type(*ty))
             .collect();
-        let params_joined = if params_str.is_empty() {
-            "void".to_string()
+        let is_variadic = fn_abi.c_variadic;
+        let mut params_joined = if params_str.is_empty() {
+            if is_variadic { "".to_string() } else { "void".to_string() }
         } else {
             params_str.join(", ")
         };
+        if is_variadic {
+            if !params_joined.is_empty() {
+                params_joined.push_str(", ");
+            }
+            params_joined.push_str("...");
+        }
         let ret_str = self.render_type(ret_ty);
         let is_internal = matches!(
             _linkage,
@@ -563,6 +572,7 @@ impl<'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx> {
         // Register FunctionDef in open_functions so append_block works
         let mut func_def = CModule::new_function_def(c_name.clone(), ret_ty, param_types);
         func_def.linkage_prefix = linkage_prefix.to_string();
+        func_def.is_variadic = is_variadic;
         let is_indirect = matches!(
             fn_abi.ret.mode,
             rustc_target::callconv::PassMode::Indirect { .. }

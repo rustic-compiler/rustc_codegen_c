@@ -1095,7 +1095,8 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 return self.cast(val, dest_ty);
             }
         };
-        let isnan = CExpr::call(CExpr::var("__builtin_isnan"), vec![CExpr::var(v.clone())]);
+        // NaN check: x != x is true iff x is NaN (works for all float types)
+        let isnan = CExpr::binop(CExpr::var(v.clone()), CBinOp::Ne, CExpr::var(v.clone()));
         let zero = CExpr::cast(dt.clone(), CExpr::lit("0"));
         let cast_v = CExpr::cast(dt.clone(), CExpr::var(v.clone()));
         let cast_max = CExpr::cast(dt, CExpr::lit(max_val.clone()));
@@ -1132,7 +1133,8 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 return self.cast(val, dest_ty);
             }
         };
-        let isnan = CExpr::call(CExpr::var("__builtin_isnan"), vec![CExpr::var(v.clone())]);
+        // NaN check: x != x is true iff x is NaN (works for all float types)
+        let isnan = CExpr::binop(CExpr::var(v.clone()), CBinOp::Ne, CExpr::var(v.clone()));
         let zero = CExpr::cast(dt.clone(), CExpr::lit("0"));
         let cast_v = CExpr::cast(dt.clone(), CExpr::var(v.clone()));
         let cast_max = CExpr::cast(dt.clone(), CExpr::lit(max_val.clone()));
@@ -1358,8 +1360,9 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let bool_ty = self.cx.intern_type(CTypeKind::Bool);
         let l = self.cx.render_value(lhs);
         let r = self.cx.render_value(rhs);
-        let isnan_l = CExpr::call(CExpr::var("__builtin_isnan"), vec![CExpr::var(l.clone())]);
-        let isnan_r = CExpr::call(CExpr::var("__builtin_isnan"), vec![CExpr::var(r.clone())]);
+        // NaN check: x != x is true iff x is NaN (works for all float types)
+        let isnan_l = CExpr::binop(CExpr::var(l.clone()), CBinOp::Ne, CExpr::var(l.clone()));
+        let isnan_r = CExpr::binop(CExpr::var(r.clone()), CBinOp::Ne, CExpr::var(r.clone()));
         let c_op = match op {
             RealPredicate::RealOEQ | RealPredicate::RealUEQ => CBinOp::Eq,
             RealPredicate::RealONE | RealPredicate::RealUNE => CBinOp::Ne,

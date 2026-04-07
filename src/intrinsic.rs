@@ -57,6 +57,39 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
             | sym::prefetch_write_data
             | sym::prefetch_read_instruction
             | sym::prefetch_write_instruction => Ok(()),
+            sym::va_copy => {
+                let dest = args[0].immediate();
+                let src = args[1].immediate();
+                let d = self.cx.render_value(dest);
+                let s = self.cx.render_value(src);
+                // va_copy is a statement macro in C
+                self.emit(CStmt::expr(CExpr::call(
+                    CExpr::var("va_copy"),
+                    vec![
+                        CExpr::deref("va_list *", CExpr::var(&d)),
+                        CExpr::deref("va_list *", CExpr::var(&s)),
+                    ],
+                )));
+                Ok(())
+            }
+            sym::va_arg => {
+                let tp_ty = instance.args.type_at(0);
+                let result_layout = self.layout_of(tp_ty);
+                let result_ty = self.backend_type(result_layout);
+                let result_ty_str = self.cx.render_type(result_ty);
+                let list = args[0].immediate();
+                let l = self.cx.render_value(list);
+                // va_arg is a macro: va_arg(*(va_list*)ptr, type)
+                let expr_str = format!(
+                    "va_arg(*(va_list *){l}, {result_ty_str})"
+                );
+                let val = self.new_temp_with_stmt(
+                    result_ty,
+                    CExpr::raw(expr_str),
+                );
+                self.store(val, result_dest.val.llval, result_dest.val.align);
+                Ok(())
+            }
             sym::catch_unwind => {
                 let try_fn = args[0].immediate();
                 let data = args[1].immediate();
@@ -334,18 +367,20 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
 
     fn va_start(&mut self, val: ValueRef) -> ValueRef {
         let v = self.cx.render_value(val);
-        self.emit(CStmt::expr(CExpr::call(
-            CExpr::var("va_start"),
-            vec![CExpr::var(&v)],
+        // va_start takes a va_list and the last named parameter.
+        // val is a pointer to a va_list, so dereference it.
+        // Use 0 as dummy last-param (GCC/Clang accept this).
+        self.emit(CStmt::raw(format!(
+            "va_start(*(va_list *){v}, 0);"
         )));
         val
     }
 
     fn va_end(&mut self, val: ValueRef) -> ValueRef {
         let v = self.cx.render_value(val);
-        self.emit(CStmt::expr(CExpr::call(
-            CExpr::var("va_end"),
-            vec![CExpr::var(&v)],
+        // val is a pointer to a va_list, so dereference it.
+        self.emit(CStmt::raw(format!(
+            "va_end(*(va_list *){v});"
         )));
         val
     }

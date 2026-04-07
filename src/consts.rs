@@ -160,6 +160,19 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
                         format!("(void *)(uintptr_t)((unsigned __int128){hi}ULL << 64 | {lo}ULL)")
                     };
                     self.intern_value(CValueKind::InlineExpr(expr), llty)
+                } else if matches!(layout.primitive(), rustc_abi::Primitive::Float(f) if f.size().bits() == 32) {
+                    // f32 scalar: reinterpret the raw bits as an f32, then
+                    // promote to f64 for the FloatConst representation.
+                    let f = f32::from_bits(data as u32);
+                    self.intern_value(CValueKind::FloatConst(f as f64), llty)
+                } else if matches!(layout.primitive(), rustc_abi::Primitive::Float(f) if f.size().bits() == 64) {
+                    // f64 scalar: reinterpret the raw bits as an f64.
+                    let f = f64::from_bits(data as u64);
+                    self.intern_value(CValueKind::FloatConst(f), llty)
+                } else if matches!(layout.primitive(), rustc_abi::Primitive::Float(_)) {
+                    // f16 / f128: emit as integer bits with a cast, since C may
+                    // not have a literal syntax for these types.
+                    self.intern_value(CValueKind::UintConst(data), llty)
                 } else if matches!(layout.primitive(), rustc_abi::Primitive::Int(_, true)) {
                     // Signed integer scalar: sign-extend the raw bit pattern
                     // so the C literal has the correct signed value.

@@ -143,7 +143,7 @@ impl TypeStore {
             CTypeKind::Float { bits: 16 } => "_Float16".into(),
             CTypeKind::Float { bits: 32 } => "float".into(),
             CTypeKind::Float { bits: 64 } => "double".into(),
-            CTypeKind::Float { bits: 128 } => "__float128".into(),
+            CTypeKind::Float { bits: 128 } => "_Float128".into(),
             CTypeKind::Float { bits } => panic!("unsupported float width: {bits}"),
             CTypeKind::Ptr => "void *".into(),
             CTypeKind::Array { element, len } => {
@@ -174,12 +174,15 @@ impl TypeStore {
                 format!("{} (*)({})", self.render(*ret), args_joined)
             }
             CTypeKind::Vector { element, len } => {
-                // GCC vector extension
+                // GCC vector extension.
+                // GCC doesn't allow pointer types as vector elements;
+                // use uintptr_t (same size) instead.
+                let elem_str = match self.get(*element) {
+                    CTypeKind::Ptr => "uintptr_t".to_string(),
+                    _ => self.render(*element),
+                };
                 format!(
-                    "{} __attribute__((vector_size({} * sizeof({}))))",
-                    self.render(*element),
-                    len,
-                    self.render(*element)
+                    "{elem_str} __attribute__((vector_size({len} * sizeof({elem_str}))))"
                 )
             }
         }

@@ -62,9 +62,10 @@ pub(crate) fn codegen(
         .function_defs
         .push(format!("void {shim_name}(void) {{}}\n"));
 
-    // Emit unwind infrastructure (setjmp/longjmp + _Unwind_RaiseException + __rust_try)
+    // Emit unwind infrastructure (setjmp/longjmp + _Unwind_RaiseException).
+    // Note: __rust_try is now emitted as a weak definition in every module's
+    // preamble (see module.rs to_c_source), so we don't emit it here.
     emit_unwind_infrastructure(module);
-    emit_rust_try(module);
 
     // Architecture-specific builtins (guarded by C preprocessor in output)
     crate::builtins::emit_aarch64_outline_atomics(module);
