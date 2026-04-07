@@ -2,7 +2,7 @@
     <h1>
         🧲
         <br>
-        rustc\_codegen\_c
+        rustc_codegen_c
     </h1>
     <p>
         Compile full-set Rust code into C
