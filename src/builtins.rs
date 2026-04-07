@@ -150,16 +150,20 @@ pub(crate) fn emit_aarch64_outline_atomics(module: &mut CModule) {
 ///
 /// `compiler_builtins` provides Rust implementations of `__udivti3`,
 /// `__umodti3`, etc., but the C-compiled versions produce incorrect
-/// results. We override them with pure-C implementations that use
+/// results. We provide pure-C fallback implementations that use
 /// `unsigned __int128` shifts/comparisons (handled inline by the C
 /// compiler) and a binary long-division loop.
+///
+/// These are emitted as `weak` symbols so that when `compiler_builtins`
+/// is also linked (e.g. `-Z build-std`), its strong definitions take
+/// precedence and no multiple-definition errors occur.
 pub(crate) fn emit_int128_division(module: &mut CModule) {
     module.function_defs.push(
         r#"
 typedef unsigned __int128 __rustc_u128;
 typedef __int128 __rustc_i128;
 
-__rustc_u128 __udivti3(__rustc_u128 n, __rustc_u128 d) {
+__attribute__((weak)) __rustc_u128 __udivti3(__rustc_u128 n, __rustc_u128 d) {
   if ((uint64_t)(n >> 64) == 0 && (uint64_t)(d >> 64) == 0)
     return (uint64_t)n / (uint64_t)d;
   __rustc_u128 q = 0, r = 0;
@@ -170,7 +174,7 @@ __rustc_u128 __udivti3(__rustc_u128 n, __rustc_u128 d) {
   return q;
 }
 
-__rustc_u128 __umodti3(__rustc_u128 n, __rustc_u128 d) {
+__attribute__((weak)) __rustc_u128 __umodti3(__rustc_u128 n, __rustc_u128 d) {
   if ((uint64_t)(n >> 64) == 0 && (uint64_t)(d >> 64) == 0)
     return (uint64_t)n % (uint64_t)d;
   __rustc_u128 r = 0;
@@ -181,7 +185,7 @@ __rustc_u128 __umodti3(__rustc_u128 n, __rustc_u128 d) {
   return r;
 }
 
-__rustc_i128 __divti3(__rustc_i128 n, __rustc_i128 d) {
+__attribute__((weak)) __rustc_i128 __divti3(__rustc_i128 n, __rustc_i128 d) {
   int neg = (n < 0) != (d < 0);
   __rustc_u128 un = n < 0 ? -(__rustc_u128)n : (__rustc_u128)n;
   __rustc_u128 ud = d < 0 ? -(__rustc_u128)d : (__rustc_u128)d;
@@ -189,7 +193,7 @@ __rustc_i128 __divti3(__rustc_i128 n, __rustc_i128 d) {
   return neg ? -(__rustc_i128)uq : (__rustc_i128)uq;
 }
 
-__rustc_i128 __modti3(__rustc_i128 n, __rustc_i128 d) {
+__attribute__((weak)) __rustc_i128 __modti3(__rustc_i128 n, __rustc_i128 d) {
   int neg = n < 0;
   __rustc_u128 un = n < 0 ? -(__rustc_u128)n : (__rustc_u128)n;
   __rustc_u128 ud = d < 0 ? -(__rustc_u128)d : (__rustc_u128)d;
