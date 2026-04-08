@@ -141,6 +141,20 @@ impl CodegenBackend for CCodegenBackend {
                 |feature| base_features.contains(feature),
             );
 
+        // Re-add ABI-required features so that
+        // check_abi_required_features() doesn't emit spurious warnings.
+        // target_features = f(true) → sess.target_features (cfg visible)
+        // unstable_target_features = f(false) → sess.unstable_target_features (ABI check)
+        // The ABI check uses sess.unstable_target_features, so add there.
+        let mut unstable_target_features = unstable_target_features;
+        let abi_required = sess.target.abi_required_features();
+        for &feat in abi_required.required {
+            let sym = rustc_span::Symbol::intern(feat);
+            if !unstable_target_features.contains(&sym) {
+                unstable_target_features.push(sym);
+            }
+        }
+
         TargetConfig {
             target_features,
             unstable_target_features,

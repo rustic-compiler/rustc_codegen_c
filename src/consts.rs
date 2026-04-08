@@ -11,6 +11,16 @@ use crate::context::CodegenCx;
 use crate::types::{CTypeKind, TypeRef};
 use crate::values::{CValueKind, ValueRef};
 
+/// Sign-extend a u128 bit pattern from `bits` width to i128.
+fn sign_extend_to_i128(val: u128, bits: u32) -> i128 {
+    if bits >= 128 {
+        val as i128
+    } else {
+        let shift = 128 - bits;
+        ((val as i128) << shift) >> shift
+    }
+}
+
 // --- ConstCodegenMethods ---
 
 impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
@@ -63,10 +73,43 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
         self.intern_value(CValueKind::UintConst(i as u128), ty)
     }
     fn const_uint(&self, t: TypeRef, i: u64) -> ValueRef {
-        self.intern_value(CValueKind::UintConst(i as u128), t)
+        // If the target type is signed, store as IntConst with proper
+        // sign-extension so C renders a signed literal (preventing
+        // zero-extension when casting to wider types).
+        let signed_bits = {
+            let types = self.types.borrow();
+            match types.get(t) {
+                CTypeKind::Int { bits, signed: true } => Some(*bits),
+                CTypeKind::PtrWidth { signed: true } => {
+                    Some(self.tcx.data_layout.pointer_size().bits() as u32)
+                }
+                _ => None,
+            }
+        };
+        if let Some(bits) = signed_bits {
+            let sext = sign_extend_to_i128(i as u128, bits);
+            self.intern_value(CValueKind::IntConst(sext), t)
+        } else {
+            self.intern_value(CValueKind::UintConst(i as u128), t)
+        }
     }
     fn const_uint_big(&self, t: TypeRef, u: u128) -> ValueRef {
-        self.intern_value(CValueKind::UintConst(u), t)
+        let signed_bits = {
+            let types = self.types.borrow();
+            match types.get(t) {
+                CTypeKind::Int { bits, signed: true } => Some(*bits),
+                CTypeKind::PtrWidth { signed: true } => {
+                    Some(self.tcx.data_layout.pointer_size().bits() as u32)
+                }
+                _ => None,
+            }
+        };
+        if let Some(bits) = signed_bits {
+            let sext = sign_extend_to_i128(u, bits);
+            self.intern_value(CValueKind::IntConst(sext), t)
+        } else {
+            self.intern_value(CValueKind::UintConst(u), t)
+        }
     }
     fn const_real(&self, t: TypeRef, val: f64) -> ValueRef {
         self.intern_value(CValueKind::FloatConst(val), t)

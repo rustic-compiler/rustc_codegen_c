@@ -1,5 +1,5 @@
 /// Layout-to-C-type conversion utilities.
-use rustc_abi::{BackendRepr, Primitive, Scalar, Size};
+use rustc_abi::{BackendRepr, Primitive, Scalar, Size, Variants};
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::ty::{self, Ty};
 use rustc_target::callconv::{ArgAbi, CastTarget, FnAbi, PassMode};
@@ -136,13 +136,13 @@ pub(crate) fn scalar_field_to_c_type<'tcx>(
     pair_layout: TyAndLayout<'tcx>,
     field_idx: usize,
 ) -> TypeRef {
-    // Try to get the field's Rust type; if it's usize/isize, use PtrWidth.
-    // field() can panic for some types (e.g. function arguments), so
-    // use catch_unwind as a safety net.
-    let field_ty = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        pair_layout.field(cx, field_idx).ty
-    }));
-    if let Ok(field_ty) = field_ty {
+    // field() can panic for enum types with Variants::Multiple (asserts
+    // field_idx == 0) or when field_idx exceeds the variant's field count.
+    // Check both conditions before calling it.
+    let can_query_field = matches!(pair_layout.variants, Variants::Single { .. })
+        && field_idx < pair_layout.layout.fields().count();
+    if can_query_field {
+        let field_ty = pair_layout.field(cx, field_idx).ty;
         match field_ty.kind() {
             ty::Uint(ty::UintTy::Usize) => {
                 return cx.intern_type(CTypeKind::PtrWidth { signed: false });
@@ -278,17 +278,11 @@ pub(crate) fn fn_abi_to_c_type<'tcx>(
         match arg.mode {
             PassMode::Ignore => continue,
             PassMode::Pair(_, _) => {
-                // Scalar pair: two separate arguments.
-                // Use layout_to_c_type which handles usize detection for
-                // the full pair, then extract the struct field types.
-                let pair_ty = layout_to_c_type(cx, arg.layout);
-                let types = cx.types.borrow();
-                if let CTypeKind::Struct { fields, .. } = types.get(pair_ty) {
-                    for &f in fields {
-                        args.push(f);
-                    }
+                // Scalar pair: two separate arguments
+                if let BackendRepr::ScalarPair(a, b) = arg.layout.backend_repr {
+                    args.push(scalar_field_to_c_type(cx, a, arg.layout, 0));
+                    args.push(scalar_field_to_c_type(cx, b, arg.layout, 1));
                 } else {
-                    drop(types);
                     args.push(layout_to_c_type(cx, arg.layout));
                 }
             }

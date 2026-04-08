@@ -75,36 +75,9 @@ pub(crate) fn codegen(
 
 /// Emit portable aligned allocation helpers.
 fn emit_aligned_alloc_helpers(module: &mut CModule) {
-    // Forward-declare libc functions used below. We avoid including
-    // <stdlib.h> because its full declarations can conflict with
-    // signatures in the generated code.
-    module.function_defs.push(
-        "#if defined(_WIN32)\n\
-         void *_aligned_malloc(size_t, size_t);\n\
-         void _aligned_free(void *);\n\
-         #else\n\
-         void free(void *);\n\
-         int posix_memalign(void **, size_t, size_t);\n\
-         #endif\n\
-         static void *__rustc_aligned_alloc(size_t size, size_t align) {\n\
-         #if defined(_WIN32)\n  \
-             return _aligned_malloc(size, align);\n\
-         #else\n  \
-             if (align < sizeof(void *)) align = sizeof(void *);\n  \
-             void *ptr;\n  \
-             if (posix_memalign(&ptr, align, size) != 0) return (void *)0;\n  \
-             return ptr;\n\
-         #endif\n\
-         }\n\
-         static void __rustc_aligned_free(void *ptr) {\n\
-         #if defined(_WIN32)\n  \
-             _aligned_free(ptr);\n\
-         #else\n  \
-             free(ptr);\n\
-         #endif\n\
-         }\n"
-        .to_string(),
-    );
+    module
+        .function_defs
+        .push(include_str!("c/aligned_alloc.c").to_string());
 }
 
 /// Emit the thread-local unwind chain definition and a hidden-visibility
@@ -120,21 +93,9 @@ fn emit_unwind_infrastructure(module: &mut CModule) {
             .to_string(),
     );
 
-    // Override _Unwind_RaiseException: longjmp to the innermost
-    // invoke/try handler instead of DWARF-based stack unwinding.
-    module.function_defs.push(
-        r#"__attribute__((visibility("hidden")))
-int _Unwind_RaiseException(void *exception_object) {
-  if (__rustc_unwind_chain) {
-    __rustc_unwind_chain->exception_ptr = exception_object;
-    __rustc_longjmp(__rustc_unwind_chain->buf, 1);
-  }
-  abort();
-  return 3;
-}
-"#
-        .to_string(),
-    );
+    module
+        .function_defs
+        .push(include_str!("c/unwind_raise_exception.c").to_string());
 }
 
 /// Emit `__rust_try`: the exception-catching trampoline for `catch_unwind`.
@@ -143,24 +104,7 @@ int _Unwind_RaiseException(void *exception_object) {
 /// chain, calls `try_fn`, and if a longjmp arrives, calls `catch_fn`
 /// with the exception pointer.
 fn emit_rust_try(module: &mut CModule) {
-    module.function_defs.push(
-        r#"int __rust_try(void (*try_fn)(void *), void *data, void (*catch_fn)(void *, void *)) {
-  struct __rustc_unwind_context __ctx;
-  __ctx.prev = __rustc_unwind_chain;
-  __ctx.exception_ptr = (void *)0;
-  __rustc_unwind_chain = &__ctx;
-  if (__rustc_setjmp(__ctx.buf) == 0) {
-    try_fn(data);
-    __rustc_unwind_chain = __ctx.prev;
-    return 0;
-  } else {
-    void *__exn = __ctx.exception_ptr;
-    __rustc_unwind_chain = __ctx.prev;
-    catch_fn(data, __exn);
-    return 1;
-  }
-}
-"#
-        .to_string(),
-    );
+    module
+        .function_defs
+        .push(include_str!("c/rust_try.c").to_string());
 }

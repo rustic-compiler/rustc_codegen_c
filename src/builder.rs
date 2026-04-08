@@ -1241,8 +1241,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             match (types.get(src_ty), types.get(dest_ty)) {
                 (CTypeKind::Int { bits: a, .. }, CTypeKind::Int { bits: b, .. }) => *a == *b,
                 (CTypeKind::PtrWidth { .. }, CTypeKind::PtrWidth { .. }) => true,
-                (CTypeKind::PtrWidth { .. }, CTypeKind::Int { .. })
-                | (CTypeKind::Int { .. }, CTypeKind::PtrWidth { .. }) => true,
+                (CTypeKind::PtrWidth { .. }, CTypeKind::Int { bits, .. })
+                | (CTypeKind::Int { bits, .. }, CTypeKind::PtrWidth { .. }) => {
+                    *bits == self.cx.tcx.data_layout.pointer_size().bits() as u32
+                }
                 _ => false,
             }
         };
@@ -1280,8 +1282,47 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
     }
     fn intcast(&mut self, val: ValueRef, dest_ty: TypeRef, is_signed: bool) -> ValueRef {
         if is_signed {
-            // Sign extension: (dest_type)val -- C promotes signed values with sign extension
-            self.cast(val, dest_ty)
+            // Sign extension: C promotes signed values with sign extension.
+            // If the source type is unsigned (e.g. uintptr_t), cast to the
+            // same-width signed type first so C sign-extends correctly.
+            let src_ty = self.cx.values.borrow().get_type(val);
+            let src_is_unsigned = {
+                let types = self.cx.types.borrow();
+                match types.get(src_ty) {
+                    CTypeKind::Int { signed: false, .. }
+                    | CTypeKind::PtrWidth { signed: false } => true,
+                    _ => false,
+                }
+            };
+            if src_is_unsigned {
+                let signed_src = {
+                    let types = self.cx.types.borrow();
+                    match types.get(src_ty) {
+                        CTypeKind::Int { bits, .. } => {
+                            let bits = *bits;
+                            drop(types);
+                            self.cx.intern_type(CTypeKind::Int { bits, signed: true })
+                        }
+                        CTypeKind::PtrWidth { .. } => {
+                            drop(types);
+                            self.cx.intern_type(CTypeKind::PtrWidth { signed: true })
+                        }
+                        _ => {
+                            drop(types);
+                            src_ty
+                        }
+                    }
+                };
+                let v = self.cx.render_value(val);
+                let st = self.cx.render_type(signed_src);
+                let dt = self.cx.render_type(dest_ty);
+                self.new_temp_with_stmt(
+                    dest_ty,
+                    CExpr::cast(dt, CExpr::cast(st, CExpr::var(v))),
+                )
+            } else {
+                self.cast(val, dest_ty)
+            }
         } else {
             // Zero extension: zext casts to unsigned first to prevent
             // sign extension when the source type is signed.
