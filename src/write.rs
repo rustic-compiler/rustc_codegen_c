@@ -1,11 +1,14 @@
 /// Module writing: serializes the CModule to a `.c` file and invokes
 /// the system C compiler to produce an object file.
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use rustc_codegen_ssa::CompiledModule;
 use rustc_codegen_ssa::back::write::{CodegenContext, ModuleConfig};
+use rustc_codegen_ssa::{CodegenResults, CompiledModule};
+use rustc_session::Session;
+use rustc_session::config::OutputFilenames;
 
 use crate::CCodegenBackend;
 use crate::module::CModule;
@@ -86,8 +89,8 @@ pub(crate) fn codegen(
         }
     }
 
-    // Copy C source to csources/ and emit Makefile alongside the output
-    emit_makefile_artifacts(cgcx, &c_source, &module.name);
+    // Copy C source to csources/
+    emit_csource_artifact(cgcx, &c_source, &module.name);
 
     CompiledModule {
         name: module.name.clone(),
@@ -117,41 +120,119 @@ fn resolve_out_dir(outputs: &rustc_session::config::OutputFilenames) -> Option<P
     Some(out_dir)
 }
 
-/// Copy the C source to `csources/` and write a Makefile to the output directory.
-fn emit_makefile_artifacts(
+/// Copy the C source to `csources/`.
+///
+/// If `RUSTC_CSOURCES_DIR` is set, C sources go there (shared across all
+/// crates); otherwise they go to `<out_dir>/csources/`.
+fn emit_csource_artifact(
     cgcx: &CodegenContext<CCodegenBackend>,
     c_source: &str,
     module_name: &str,
 ) {
-    let out_dir = match resolve_out_dir(&cgcx.output_filenames) {
-        Some(d) => d,
-        None => return,
+    let csources_dir = if let Ok(dir) = std::env::var("RUSTC_CSOURCES_DIR") {
+        PathBuf::from(dir)
+    } else {
+        let out_dir = match resolve_out_dir(&cgcx.output_filenames) {
+            Some(d) => d,
+            None => return,
+        };
+        out_dir.join("csources")
     };
 
-    let crate_name = cgcx
-        .output_filenames
-        .with_extension("")
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "a.out".to_string());
-
-    // Create csources/ and write the C source there
-    let csources_dir = out_dir.join("csources");
     let _ = fs::create_dir_all(&csources_dir);
 
     let safe_name =
         module_name.replace(|c: char| !c.is_alphanumeric() && c != '_' && c != '-', "_");
     let _ = fs::write(csources_dir.join(format!("{safe_name}.c")), c_source);
+}
 
-    // Write Makefile (idempotent: same content regardless of which CGU writes it)
+/// Called once at link time to emit the final Makefile with complete
+/// dependency information (native libs collected from all crates).
+pub(crate) fn emit_final_makefile(
+    sess: &Session,
+    codegen_results: &CodegenResults,
+    outputs: &OutputFilenames,
+) {
+    let out_dir = if let Ok(dir) = std::env::var("RUSTC_CSOURCES_DIR") {
+        // When RUSTC_CSOURCES_DIR is set, place the Makefile next to csources.
+        match PathBuf::from(&dir).parent() {
+            Some(p) if p.as_os_str().is_empty() => PathBuf::from("."),
+            Some(p) => p.to_path_buf(),
+            None => PathBuf::from("."),
+        }
+    } else {
+        match resolve_out_dir(outputs) {
+            Some(d) => d,
+            None => return,
+        }
+    };
+
+    let crate_name = outputs
+        .with_extension("")
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "a.out".to_string());
+
+    let target_arch = sess.target.arch.to_string();
+
+    // Collect shared (dylib) native library names from all dependency
+    // crates.  Static libs from build scripts are bundled in rlibs and
+    // replaced by native_stubs.c for the Makefile build, so skip them.
+    // Also skip libraries that are implicitly linked by cc.
+    const IMPLICIT_LIBS: &[&str] = &["c", "gcc", "gcc_s", "gcc_eh", "compiler-rt"];
+
+    let mut native_libs = BTreeSet::new();
+    for libs in codegen_results.crate_info.native_libraries.values() {
+        for lib in libs {
+            use rustc_hir::attrs::NativeLibKind;
+            if let NativeLibKind::Dylib { .. } = lib.kind {
+                let name = lib.name.as_str();
+                if !IMPLICIT_LIBS.contains(&name) {
+                    native_libs.insert(name.to_string());
+                }
+            }
+        }
+    }
+    for lib in &codegen_results.crate_info.used_libraries {
+        use rustc_hir::attrs::NativeLibKind;
+        if let NativeLibKind::Dylib { .. } = lib.kind {
+            let name = lib.name.as_str();
+            if !IMPLICIT_LIBS.contains(&name) {
+                native_libs.insert(name.to_string());
+            }
+        }
+    }
+    // Always include core system libraries.
+    for name in ["pthread", "dl", "m"] {
+        native_libs.insert(name.to_string());
+    }
+
     let _ = fs::write(
         out_dir.join("Makefile"),
-        generate_makefile(&crate_name, &cgcx.target_arch),
+        generate_makefile(&crate_name, &target_arch, &native_libs),
+    );
+
+    // Write native_stubs.c — portable C fallbacks for build-script
+    // native code (psm, blake3).  Separate TU avoids type conflicts
+    // with codegen-emitted forward declarations.
+    let csources_dir = if let Ok(dir) = std::env::var("RUSTC_CSOURCES_DIR") {
+        PathBuf::from(dir)
+    } else {
+        out_dir.join("csources")
+    };
+    let _ = fs::create_dir_all(&csources_dir);
+    let _ = fs::write(
+        csources_dir.join("native_stubs.c"),
+        crate::native_stubs::generate(),
     );
 }
 
 /// Generate Makefile content with `tarball` and `build` targets.
-fn generate_makefile(crate_name: &str, target_arch: &str) -> String {
+fn generate_makefile(
+    crate_name: &str,
+    target_arch: &str,
+    native_libs: &BTreeSet<String>,
+) -> String {
     let mut s = String::new();
     s.push_str("# Generated by rustc_codegen_c\n");
     s.push_str("# Makefile for building from transpiled C sources\n\n");
@@ -164,7 +245,12 @@ fn generate_makefile(crate_name: &str, target_arch: &str) -> String {
         s.push_str("CFLAGS += -mno-outline-atomics\n");
     }
 
-    s.push_str("\nLDFLAGS := -Wl,--gc-sections -lpthread -ldl -lm\n\n");
+    // Build LDFLAGS from collected native libs.
+    let lib_flags: Vec<String> = native_libs.iter().map(|l| format!("-l{l}")).collect();
+    s.push_str(&format!(
+        "\nLDFLAGS := -Wl,--gc-sections -Wl,--allow-multiple-definition {}\n\n",
+        lib_flags.join(" "),
+    ));
 
     s.push_str("SRCDIR := csources\n");
     s.push_str("SRCS := $(wildcard $(SRCDIR)/*.c)\n");
@@ -172,15 +258,15 @@ fn generate_makefile(crate_name: &str, target_arch: &str) -> String {
     s.push_str(&format!("OUTPUT := {crate_name}\n"));
     s.push_str("TARBALL := csources.tar.gz\n\n");
 
-    s.push_str(".PHONY: tarball build clean\n\n");
-
-    s.push_str("# Create tarball of C source files and Makefile\n");
-    s.push_str("tarball:\n");
-    s.push_str("\ttar czf $(TARBALL) Makefile $(SRCDIR)\n\n");
+    s.push_str(".PHONY: build tarball clean\n\n");
 
     s.push_str("# Build from C source files (or from extracted tarball)\n");
     s.push_str("build: $(OBJS)\n");
     s.push_str("\t$(CC) $(OBJS) $(LDFLAGS) -o $(OUTPUT)\n\n");
+
+    s.push_str("# Create tarball of C source files and Makefile\n");
+    s.push_str("tarball:\n");
+    s.push_str("\ttar czf $(TARBALL) Makefile $(SRCDIR)\n\n");
 
     s.push_str("$(SRCDIR)/%.o: $(SRCDIR)/%.c\n");
     s.push_str("\t$(CC) $(CFLAGS) -c -o $@ $<\n\n");

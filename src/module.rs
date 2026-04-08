@@ -307,7 +307,7 @@ impl CModule {
         // We keep this as a weak (not extern) so that no_std binaries
         // without an allocator module still link.
         s.push_str(
-            "__attribute__((weak)) __thread struct __rustc_unwind_context *__rustc_unwind_chain;\n",
+            "__attribute__((weak, visibility(\"default\"))) __thread struct __rustc_unwind_context *__rustc_unwind_chain;\n",
         );
         // Weak definition of __rust_try so that binary crates linking
         // dynamically against std can resolve this symbol from their own

@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use rustc_ast::expand::allocator::AllocatorMethod;
+use rustc_codegen_ssa::back::archive::ArArchiveBuilderBuilder;
+use rustc_codegen_ssa::back::link::link_binary;
 use rustc_codegen_ssa::back::lto::{SerializedModule, ThinModule};
 use rustc_codegen_ssa::back::write::{
     CodegenContext, FatLtoInput, ModuleConfig, TargetMachineFactoryFn,
@@ -23,6 +25,7 @@ use rustc_codegen_ssa::traits::*;
 use rustc_codegen_ssa::{CodegenResults, CompiledModule, ModuleCodegen, ModuleKind, TargetConfig};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::DiagCtxtHandle;
+use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::{self, WorkProduct, WorkProductId};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
@@ -38,6 +41,7 @@ mod context;
 mod debuginfo;
 mod intrinsic;
 mod module;
+mod native_stubs;
 mod type_of;
 mod types;
 mod values;
@@ -171,6 +175,27 @@ impl CodegenBackend for CCodegenBackend {
             .downcast::<rustc_codegen_ssa::back::write::OngoingCodegen<CCodegenBackend>>()
             .expect("Expected CCodegenBackend's OngoingCodegen, found Box<Any>")
             .join(sess)
+    }
+
+    fn link(
+        &self,
+        sess: &Session,
+        codegen_results: CodegenResults,
+        metadata: EncodedMetadata,
+        outputs: &OutputFilenames,
+    ) {
+        // Emit the final Makefile with complete dependency info.
+        write::emit_final_makefile(sess, &codegen_results, outputs);
+
+        // Proceed with normal linking.
+        link_binary(
+            sess,
+            &ArArchiveBuilderBuilder,
+            codegen_results,
+            metadata,
+            outputs,
+            self.name(),
+        );
     }
 
     fn print(&self, _req: &PrintRequest, _out: &mut String, _sess: &Session) {}
