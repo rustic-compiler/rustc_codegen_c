@@ -511,10 +511,12 @@ impl<'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx> {
             match arg.mode {
                 rustc_target::callconv::PassMode::Ignore => continue,
                 rustc_target::callconv::PassMode::Pair(_, _) => {
-                    // ScalarPair: decompose into two separate params
+                    // ScalarPair: decompose into two separate params.
+                    // Use scalar_field_to_c_type (same as fn_abi_to_c_type)
+                    // so the declaration matches the internal function type.
                     if let rustc_abi::BackendRepr::ScalarPair(a, b) = arg.layout.backend_repr {
-                        let a_ty = crate::type_of::scalar_to_c_type(self, a);
-                        let b_ty = crate::type_of::scalar_to_c_type(self, b);
+                        let a_ty = crate::type_of::scalar_field_to_c_type(self, a, arg.layout, 0);
+                        let b_ty = crate::type_of::scalar_field_to_c_type(self, b, arg.layout, 1);
                         param_types.push((a_ty, format!("_arg{arg_idx}")));
                         arg_idx += 1;
                         param_types.push((b_ty, format!("_arg{arg_idx}")));

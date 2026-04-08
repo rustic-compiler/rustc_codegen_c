@@ -143,8 +143,8 @@ impl CodegenBackend for CCodegenBackend {
 
         // Re-add ABI-required features so that
         // check_abi_required_features() doesn't emit spurious warnings.
-        // target_features = f(true) → sess.target_features (cfg visible)
-        // unstable_target_features = f(false) → sess.unstable_target_features (ABI check)
+        // target_features = f(true) -> sess.target_features (cfg visible)
+        // unstable_target_features = f(false) -> sess.unstable_target_features (ABI check)
         // The ABI check uses sess.unstable_target_features, so add there.
         let mut unstable_target_features = unstable_target_features;
         let abi_required = sess.target.abi_required_features();
@@ -204,10 +204,16 @@ impl CodegenBackend for CCodegenBackend {
         // Add them to the export list so they appear in the `global:` section.
         use rustc_middle::middle::exported_symbols::SymbolExportKind;
         for crate_type in codegen_results.crate_info.crate_types.clone() {
-            if let Some(syms) =
-                codegen_results.crate_info.exported_symbols.get_mut(&crate_type)
+            if let Some(syms) = codegen_results
+                .crate_info
+                .exported_symbols
+                .get_mut(&crate_type)
             {
-                for name in ["__rustc_unwind_chain", "_Unwind_RaiseException", "__rust_try"] {
+                for name in [
+                    "__rustc_unwind_chain",
+                    "_Unwind_RaiseException",
+                    "__rust_try",
+                ] {
                     syms.push((name.to_string(), SymbolExportKind::Text));
                 }
             }

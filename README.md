@@ -2,7 +2,7 @@
     <h1>
         🧲
         <br>
-        rustc_codegen_c for rustic compiler
+        rustc_codegen_c
     </h1>
     <p>
         rustic compiler compiles full-set Rust code into C
@@ -59,6 +59,8 @@ ln -s ../../rustc_codegen_c ./rustc_codegen_c
 cd ../
 cat << EOF > bootstrap.toml
 profile = "dist"
+[llvm]
+download-ci-llvm = true
 [rust]
 codegen-backends = ["c"]
 EOF

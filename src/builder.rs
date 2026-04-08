@@ -86,6 +86,34 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         self.new_temp_with_stmt(dest_ty, CExpr::cast(t, CExpr::var(v)))
     }
 
+    /// Insert an explicit C cast when `val`'s type is a pointer but `dest_ty`
+    /// is an integer (or vice-versa).  Without this, clang emits
+    /// `-Wint-conversion` errors for implicit `uintptr_t` <-> `void *`
+    /// conversions.  Returns `val` unchanged when no cast is required.
+    fn coerce_ptr_int(&mut self, val: ValueRef, dest_ty: TypeRef) -> ValueRef {
+        let src_ty = self.cx.values.borrow().get_type(val);
+        if src_ty == dest_ty {
+            return val;
+        }
+        let needs_cast = {
+            let types = self.cx.types.borrow();
+            let src = types.get(src_ty);
+            let dst = types.get(dest_ty);
+            matches!(
+                (src, dst),
+                (CTypeKind::Ptr, CTypeKind::PtrWidth { .. })
+                    | (CTypeKind::Ptr, CTypeKind::Int { .. })
+                    | (CTypeKind::PtrWidth { .. }, CTypeKind::Ptr)
+                    | (CTypeKind::Int { .. }, CTypeKind::Ptr)
+            )
+        };
+        if needs_cast {
+            self.cast(val, dest_ty)
+        } else {
+            val
+        }
+    }
+
     /// Get the unsigned variant of an integer type.
     /// Returns None if the type is not a signed integer.
     pub(crate) fn unsigned_type(&self, ty: TypeRef) -> Option<TypeRef> {
@@ -1316,10 +1344,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 let v = self.cx.render_value(val);
                 let st = self.cx.render_type(signed_src);
                 let dt = self.cx.render_type(dest_ty);
-                self.new_temp_with_stmt(
-                    dest_ty,
-                    CExpr::cast(dt, CExpr::cast(st, CExpr::var(v))),
-                )
+                self.new_temp_with_stmt(dest_ty, CExpr::cast(dt, CExpr::cast(st, CExpr::var(v))))
             } else {
                 self.cast(val, dest_ty)
             }
@@ -1591,6 +1616,21 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
 
     fn insert_value(&mut self, agg_val: ValueRef, elt: ValueRef, idx: u64) -> ValueRef {
         let agg_ty = self.cx.values.borrow().get_type(agg_val);
+        // Cast element if the field type differs (e.g. void* vs uintptr_t)
+        let elt = {
+            let field_ty = {
+                let types = self.cx.types.borrow();
+                match types.get(agg_ty) {
+                    CTypeKind::Struct { fields, .. } => Some(fields[idx as usize]),
+                    _ => None,
+                }
+            };
+            if let Some(ft) = field_ty {
+                self.coerce_ptr_int(elt, ft)
+            } else {
+                elt
+            }
+        };
         let result = self.cx.new_temp(agg_ty);
         let result_name = self.cx.render_value(result);
         let e = self.cx.render_value(elt);
@@ -1968,7 +2008,32 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             (None, args)
         };
 
-        let args_exprs: Vec<_> = actual_args
+        // Coerce arguments where the declared parameter type differs from the
+        // actual value type (e.g. uintptr_t vs void*).  Use get_fn_sig when
+        // available since that is the signature emitted in the C declaration.
+        let fn_sig_ty = {
+            let values = self.cx.values.borrow();
+            values.get_fn_sig(fn_val).unwrap_or(llty)
+        };
+        let param_types: Vec<TypeRef> = {
+            let types = self.cx.types.borrow();
+            match types.get(fn_sig_ty) {
+                CTypeKind::Function { args: params, .. } => params.clone(),
+                _ => Vec::new(),
+            }
+        };
+        let coerced_args: Vec<ValueRef> = actual_args
+            .iter()
+            .enumerate()
+            .map(|(i, &a)| {
+                if let Some(&pty) = param_types.get(i) {
+                    self.coerce_ptr_int(a, pty)
+                } else {
+                    a
+                }
+            })
+            .collect();
+        let args_exprs: Vec<_> = coerced_args
             .iter()
             .map(|a| CExpr::var(self.cx.render_value(*a)))
             .collect();
