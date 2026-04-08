@@ -41,6 +41,7 @@ jobs:
           repository: rustic-compiler/rust
           ref: ${{ env.RUST_BRANCH }}
           path: rust
+          submodules: recursive
 
       - name: Checkout rustc_codegen_c
         uses: actions/checkout@v6
