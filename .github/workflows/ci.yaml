@@ -9,6 +9,7 @@ on:
   workflow_dispatch:
 
 env:
+  RUST_BRANCH: rustic-1.94.1
   MAX_FAIL_PERCENT: 1
   BOOTSTRAP_TOML: |
     profile = "dist"
@@ -35,7 +36,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: rustic-compiler/rust
-          ref: rustic-1.94.1
+          ref: ${{ env.RUST_BRANCH }}
           path: rust
 
       - name: Checkout rustc_codegen_c
@@ -58,13 +59,23 @@ jobs:
       - name: Build
         run: cd rust && ./x build compiler library
 
-      - name: Create tarball
+      - name: Create stage2 tarball
         run: |
           cd rust/build/host/stage2
-          tar czf "$GITHUB_WORKSPACE/rustic-$HOST_TUPLE-${{ matrix.cc }}.tar.gz" .
+          tar czf "$GITHUB_WORKSPACE/rustic-toolchain-$HOST_TUPLE-${{ matrix.cc }}.tar.gz" .
+      - name: Create csources tarball
+        run: |
+          mkdir csources
+          cp rust/build/$HOST_TUPLE/stage2-rustc/$HOST_TUPLE/release/Makefile ./
+          cp rust/build/$HOST_TUPLE/stage2-rustc/$HOST_TUPLE/release/csources/*.c ./csources/
+          cp rust/build/$HOST_TUPLE/stage1-std/$HOST_TUPLE/release/csources/*.c ./csources/
+          tar czf "$GITHUB_WORKSPACE/rustic-rustc-csources-$HOST_TUPLE-${{ matrix.cc }}.tar.gz" csources Makefile
+
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: rustic-${{ env.HOST_TUPLE }}-${{ matrix.cc }}
-          path: rustic-${{ env.HOST_TUPLE }}-${{ matrix.cc }}.tar.gz
+          path: |
+            rustic-toolchain-${{ env.HOST_TUPLE }}-${{ matrix.cc }}.tar.gz
+            rustic-rustc-csources-${{ env.HOST_TUPLE }}-${{ matrix.cc }}.tar.gz
