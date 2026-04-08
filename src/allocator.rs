@@ -93,9 +93,8 @@ fn emit_unwind_infrastructure(module: &mut CModule) {
             .to_string(),
     );
 
-    module
-        .function_defs
-        .push(include_str!("c/unwind_raise_exception.c").to_string());
+    // _Unwind_RaiseException is now emitted as a weak definition in every
+    // module's preamble (see preamble.c), so we don't emit it here.
 }
 
 /// Emit `__rust_try`: the exception-catching trampoline for `catch_unwind`.

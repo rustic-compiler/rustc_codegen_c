@@ -21,6 +21,14 @@ struct __rustc_unwind_context {
   struct __rustc_unwind_context *prev;
 };
 __attribute__((weak, visibility("default"))) __thread struct __rustc_unwind_context *__rustc_unwind_chain;
+__attribute__((weak, visibility("default"))) int _Unwind_RaiseException(void *exception_object) {
+  if (__rustc_unwind_chain) {
+    __rustc_unwind_chain->exception_ptr = exception_object;
+    __rustc_longjmp(__rustc_unwind_chain->buf, 1);
+  }
+  abort();
+  return 3;
+}
 __attribute__((weak)) int __rust_try(void (*try_fn)(void *), void *data, void (*catch_fn)(void *, void *)) {
   struct __rustc_unwind_context __ctx;
   __ctx.prev = __rustc_unwind_chain;

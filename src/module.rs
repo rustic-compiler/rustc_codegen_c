@@ -232,6 +232,7 @@ impl CModule {
                 "memmove",
                 "abort",
                 "__rust_try",
+                "_Unwind_RaiseException",
             ]
             .iter()
             .map(|s| s.to_string())

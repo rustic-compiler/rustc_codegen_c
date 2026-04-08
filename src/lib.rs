@@ -190,12 +190,28 @@ impl CodegenBackend for CCodegenBackend {
     fn link(
         &self,
         sess: &Session,
-        codegen_results: CodegenResults,
+        mut codegen_results: CodegenResults,
         metadata: EncodedMetadata,
         outputs: &OutputFilenames,
     ) {
         // Emit the final Makefile with complete dependency info.
         write::emit_final_makefile(sess, &codegen_results, outputs);
+
+        // The C backend's setjmp/longjmp unwind mechanism requires that
+        // __rustc_unwind_chain (TLS), _Unwind_RaiseException, and __rust_try
+        // are shared between the binary and any dylibs (e.g. libstd.so).
+        // By default, the version script's `local: *` makes them local.
+        // Add them to the export list so they appear in the `global:` section.
+        use rustc_middle::middle::exported_symbols::SymbolExportKind;
+        for crate_type in codegen_results.crate_info.crate_types.clone() {
+            if let Some(syms) =
+                codegen_results.crate_info.exported_symbols.get_mut(&crate_type)
+            {
+                for name in ["__rustc_unwind_chain", "_Unwind_RaiseException", "__rust_try"] {
+                    syms.push((name.to_string(), SymbolExportKind::Text));
+                }
+            }
+        }
 
         // Proceed with normal linking.
         link_binary(
