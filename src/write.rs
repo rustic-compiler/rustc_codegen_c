@@ -212,7 +212,7 @@ pub(crate) fn emit_final_makefile(
         generate_makefile(&crate_name, &target_arch, &native_libs),
     );
 
-    // Write native_stubs.c — portable C fallbacks for build-script
+    // Write native_stubs.c -- portable C fallbacks for build-script
     // native code (psm, blake3).  Separate TU avoids type conflicts
     // with codegen-emitted forward declarations.
     let csources_dir = if let Ok(dir) = std::env::var("RUSTC_CSOURCES_DIR") {

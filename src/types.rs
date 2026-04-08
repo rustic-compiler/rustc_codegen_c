@@ -55,6 +55,12 @@ pub enum CTypeKind {
         element: TypeRef,
         len: u64,
     },
+    /// Pointer-width integer (renders as intptr_t / uintptr_t).
+    /// Portable across architectures with the same or different pointer
+    /// widths -- the C compiler picks the correct size.
+    PtrWidth {
+        signed: bool,
+    },
 }
 
 /// Storage for interned types.
@@ -178,10 +184,17 @@ impl TypeStore {
                 // GCC doesn't allow pointer types as vector elements;
                 // use uintptr_t (same size) instead.
                 let elem_str = match self.get(*element) {
-                    CTypeKind::Ptr => "uintptr_t".to_string(),
+                    CTypeKind::Ptr | CTypeKind::PtrWidth { .. } => "uintptr_t".to_string(),
                     _ => self.render(*element),
                 };
                 format!("{elem_str} __attribute__((vector_size({len} * sizeof({elem_str}))))")
+            }
+            CTypeKind::PtrWidth { signed } => {
+                if *signed {
+                    "intptr_t".into()
+                } else {
+                    "uintptr_t".into()
+                }
             }
         }
     }
@@ -247,8 +260,7 @@ impl<'tcx> BaseTypeCodegenMethods for CodegenCx<'tcx> {
         })
     }
     fn type_isize(&self) -> TypeRef {
-        let bits = self.tcx.data_layout.pointer_size().bits() as u32;
-        self.intern_type(CTypeKind::Int { bits, signed: true })
+        self.intern_type(CTypeKind::PtrWidth { signed: true })
     }
 
     fn type_f16(&self) -> TypeRef {
@@ -293,6 +305,7 @@ impl<'tcx> BaseTypeCodegenMethods for CodegenCx<'tcx> {
             CTypeKind::Struct { .. } => TypeKind::Struct,
             CTypeKind::Function { .. } => TypeKind::Function,
             CTypeKind::Vector { .. } => TypeKind::ScalableVector,
+            CTypeKind::PtrWidth { .. } => TypeKind::Integer,
         }
     }
 
@@ -335,6 +348,7 @@ impl<'tcx> BaseTypeCodegenMethods for CodegenCx<'tcx> {
         match store.get(ty) {
             CTypeKind::Bool => 1,
             CTypeKind::Int { bits, .. } => *bits as u64,
+            CTypeKind::PtrWidth { .. } => self.tcx.data_layout.pointer_size().bits(),
             // Pointer-typed values can appear in integer contexts (e.g., shifts)
             CTypeKind::Ptr => self.tcx.data_layout.pointer_size().bits(),
             other => panic!(
@@ -415,7 +429,7 @@ impl<'tcx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx> {
             _ => panic!("scalar_pair_element_backend_type on non-scalar-pair"),
         };
         let scalar = if index == 0 { a } else { b };
-        crate::type_of::scalar_to_c_type(self, scalar)
+        crate::type_of::scalar_field_to_c_type(self, scalar, layout, index)
     }
 }
 

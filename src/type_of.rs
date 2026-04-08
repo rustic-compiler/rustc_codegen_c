@@ -1,7 +1,7 @@
 /// Layout-to-C-type conversion utilities.
 use rustc_abi::{BackendRepr, Primitive, Scalar, Size};
-use rustc_middle::ty::Ty;
 use rustc_middle::ty::layout::TyAndLayout;
+use rustc_middle::ty::{self, Ty};
 use rustc_target::callconv::{ArgAbi, CastTarget, FnAbi, PassMode};
 
 use crate::context::CodegenCx;
@@ -19,10 +19,23 @@ pub(crate) fn layout_to_c_type<'tcx>(cx: &CodegenCx<'tcx>, layout: TyAndLayout<'
     }
 
     match layout.backend_repr {
-        BackendRepr::Scalar(scalar) => scalar_to_c_type(cx, scalar),
+        BackendRepr::Scalar(scalar) => {
+            // Use intptr_t/uintptr_t when the Rust type is usize/isize.
+            // We must NOT use PtrWidth for all pointer-width integers
+            // because genuine u64/i64 (e.g. f64 bit patterns) must stay
+            // uint64_t/int64_t -- on 32-bit targets uintptr_t would be
+            // 32 bits, breaking 64-bit operations.
+            match layout.ty.kind() {
+                ty::Uint(ty::UintTy::Usize) => {
+                    cx.intern_type(CTypeKind::PtrWidth { signed: false })
+                }
+                ty::Int(ty::IntTy::Isize) => cx.intern_type(CTypeKind::PtrWidth { signed: true }),
+                _ => scalar_to_c_type(cx, scalar),
+            }
+        }
         BackendRepr::ScalarPair(a, b) => {
-            let a_ty = scalar_to_c_type(cx, a);
-            let b_ty = scalar_to_c_type(cx, b);
+            let a_ty = scalar_field_to_c_type(cx, a, layout, 0);
+            let b_ty = scalar_field_to_c_type(cx, b, layout, 1);
             cx.intern_type(CTypeKind::Struct {
                 fields: vec![a_ty, b_ty],
                 packed: false,
@@ -110,6 +123,37 @@ pub(crate) fn scalar_to_c_type(cx: &CodegenCx<'_>, scalar: Scalar) -> TypeRef {
         }
         Primitive::Pointer(_) => cx.intern_type(CTypeKind::Ptr),
     }
+}
+
+/// Convert a scalar field of a ScalarPair to a C type, using the
+/// pair's layout to detect usize/isize fields (e.g. slice length).
+///
+/// This is only safe to call when the pair_layout represents a
+/// struct-like type (not a function argument split into two).
+pub(crate) fn scalar_field_to_c_type<'tcx>(
+    cx: &CodegenCx<'tcx>,
+    scalar: Scalar,
+    pair_layout: TyAndLayout<'tcx>,
+    field_idx: usize,
+) -> TypeRef {
+    // Try to get the field's Rust type; if it's usize/isize, use PtrWidth.
+    // field() can panic for some types (e.g. function arguments), so
+    // use catch_unwind as a safety net.
+    let field_ty = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pair_layout.field(cx, field_idx).ty
+    }));
+    if let Ok(field_ty) = field_ty {
+        match field_ty.kind() {
+            ty::Uint(ty::UintTy::Usize) => {
+                return cx.intern_type(CTypeKind::PtrWidth { signed: false });
+            }
+            ty::Int(ty::IntTy::Isize) => {
+                return cx.intern_type(CTypeKind::PtrWidth { signed: true });
+            }
+            _ => {}
+        }
+    }
+    scalar_to_c_type(cx, scalar)
 }
 
 /// Convert a CastTarget to a C type.
@@ -234,11 +278,17 @@ pub(crate) fn fn_abi_to_c_type<'tcx>(
         match arg.mode {
             PassMode::Ignore => continue,
             PassMode::Pair(_, _) => {
-                // Scalar pair: two separate arguments
-                if let BackendRepr::ScalarPair(a, b) = arg.layout.backend_repr {
-                    args.push(scalar_to_c_type(cx, a));
-                    args.push(scalar_to_c_type(cx, b));
+                // Scalar pair: two separate arguments.
+                // Use layout_to_c_type which handles usize detection for
+                // the full pair, then extract the struct field types.
+                let pair_ty = layout_to_c_type(cx, arg.layout);
+                let types = cx.types.borrow();
+                if let CTypeKind::Struct { fields, .. } = types.get(pair_ty) {
+                    for &f in fields {
+                        args.push(f);
+                    }
                 } else {
+                    drop(types);
                     args.push(layout_to_c_type(cx, arg.layout));
                 }
             }

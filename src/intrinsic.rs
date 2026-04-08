@@ -347,6 +347,9 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
     ) -> ValueRef {
         let ptr_ty = self.cx.type_ptr();
         let vtable = self.cx.render_value(llvtable);
+        let ptr_size = self.cx.tcx.data_layout.pointer_size().bytes();
+        let slot_index = vtable_byte_offset / ptr_size;
+        let offset_expr = format!("{slot_index} * sizeof(void *)");
         self.new_temp_with_stmt(
             ptr_ty,
             CExpr::deref(
@@ -354,7 +357,7 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
                 CExpr::paren(CExpr::binop(
                     CExpr::cast("char *", CExpr::var(&vtable)),
                     CBinOp::Add,
-                    CExpr::lit(format!("{vtable_byte_offset}")),
+                    CExpr::raw(offset_expr),
                 )),
             ),
         )
@@ -702,7 +705,7 @@ fn codegen_saturating<'a, 'tcx>(
     };
     let is_signed = matches!(
         bx.cx.types.borrow().get(ty),
-        CTypeKind::Int { signed: true, .. }
+        CTypeKind::Int { signed: true, .. } | CTypeKind::PtrWidth { signed: true }
     );
     let clamp = if is_signed {
         let (min_val, max_val) = if bits <= 64 {

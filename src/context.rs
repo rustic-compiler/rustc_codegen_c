@@ -56,6 +56,10 @@ impl<'tcx> CodegenCx<'tcx> {
     }
 
     /// Intern a type into the type store.
+    pub fn type_usize(&self) -> TypeRef {
+        self.intern_type(CTypeKind::PtrWidth { signed: false })
+    }
+
     pub fn intern_type(&self, kind: CTypeKind) -> TypeRef {
         self.types.borrow_mut().intern(kind)
     }
@@ -217,7 +221,7 @@ impl<'tcx> CodegenCx<'tcx> {
             return;
         }
         module.struct_defs.push(format!(
-            "struct {struct_name} {{ {fields_str} }} __attribute__((packed, aligned({pointer_size})));"
+            "struct {struct_name} {{ {fields_str} }} __attribute__((packed, aligned(sizeof(void *))));"
         ));
         let asm = Self::asm_label(original_name, c_name);
         module.add_global_decl(

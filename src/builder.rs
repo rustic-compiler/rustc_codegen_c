@@ -99,6 +99,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     signed: false,
                 }))
             }
+            CTypeKind::PtrWidth { signed: true } => {
+                drop(types);
+                Some(self.cx.intern_type(CTypeKind::PtrWidth { signed: false }))
+            }
             _ => None,
         }
     }
@@ -370,6 +374,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 let unsigned_ty = format!("uint{bits}_t");
                 CExpr::cast(unsigned_ty, CExpr::var(val))
             }
+            CTypeKind::PtrWidth { signed: true } => CExpr::cast("uintptr_t", CExpr::var(val)),
             _ => CExpr::var(val),
         };
         drop(types);
@@ -1043,9 +1048,9 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
 
         let base = CExpr::cast("uintptr_t", CExpr::var(&p));
         let scaled_idx0 = CExpr::binop(
-            CExpr::cast("int64_t", CExpr::paren(CExpr::var(&idx0))),
+            CExpr::cast("intptr_t", CExpr::paren(CExpr::var(&idx0))),
             CBinOp::Mul,
-            CExpr::cast("int64_t", CExpr::sizeof_ty(&t)),
+            CExpr::cast("intptr_t", CExpr::sizeof_ty(&t)),
         );
 
         if indices.len() == 1 {
@@ -1056,7 +1061,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             let sum = CExpr::binop(
                 CExpr::binop(base, CBinOp::Add, scaled_idx0),
                 CBinOp::Add,
-                CExpr::cast("int64_t", CExpr::paren(CExpr::var(&idx1))),
+                CExpr::cast("intptr_t", CExpr::paren(CExpr::var(&idx1))),
             );
             self.new_temp_with_stmt(ptr_ty, CExpr::cast("void *", CExpr::paren(sum)))
         } else {
@@ -1089,6 +1094,11 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 } else {
                     format!("{}.0", (1u128 << bits) - 1)
                 }
+            }
+            CTypeKind::PtrWidth { .. } => {
+                drop(types);
+                // Use UINTPTR_MAX for portable saturation bound
+                "(double)UINTPTR_MAX".to_string()
             }
             _ => {
                 drop(types);
@@ -1127,6 +1137,14 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 let min = -(1i128 << (bits - 1));
                 let max = (1i128 << (bits - 1)) - 1;
                 (format!("{min}.0"), format!("{max}.0"))
+            }
+            CTypeKind::PtrWidth { signed: true } => {
+                drop(types);
+                // Use INTPTR_MIN/MAX for portable saturation bounds
+                (
+                    "(double)INTPTR_MIN".to_string(),
+                    "(double)INTPTR_MAX".to_string(),
+                )
             }
             _ => {
                 drop(types);
@@ -1216,12 +1234,15 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             return self.cast(val, dest_ty);
         }
 
-        // Same-width integer types (e.g. int64_t <-> uint64_t): a C cast
-        // preserves the bit pattern without needing memcpy.
+        // Same-width integer types (e.g. int64_t <-> uint64_t, intptr_t <-> uintptr_t):
+        // a C cast preserves the bit pattern without needing memcpy.
         let both_int_same_width = {
             let types = self.cx.types.borrow();
             match (types.get(src_ty), types.get(dest_ty)) {
                 (CTypeKind::Int { bits: a, .. }, CTypeKind::Int { bits: b, .. }) => *a == *b,
+                (CTypeKind::PtrWidth { .. }, CTypeKind::PtrWidth { .. }) => true,
+                (CTypeKind::PtrWidth { .. }, CTypeKind::Int { .. })
+                | (CTypeKind::Int { .. }, CTypeKind::PtrWidth { .. }) => true,
                 _ => false,
             }
         };
@@ -1306,6 +1327,30 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 | IntPredicate::IntSLT
                 | IntPredicate::IntSLE
         );
+
+        // Check if either operand is a pointer-width type.
+        let either_ptrwidth = {
+            let types = self.cx.types.borrow();
+            matches!(types.get(lhs_ty), CTypeKind::PtrWidth { .. })
+                || matches!(types.get(rhs_ty), CTypeKind::PtrWidth { .. })
+        };
+
+        if either_ptrwidth {
+            // When either operand is intptr_t/uintptr_t, use pointer-width
+            // cast type to keep the comparison portable.
+            let cast_ty = self.cx.intern_type(CTypeKind::PtrWidth {
+                signed: !is_unsigned,
+            });
+            let ct = self.cx.render_type(cast_ty);
+            return self.new_temp_with_stmt(
+                bool_ty,
+                CExpr::binop(
+                    CExpr::cast(&ct, CExpr::var(&l)),
+                    c_op,
+                    CExpr::cast(ct, CExpr::var(&r)),
+                ),
+            );
+        }
 
         // Get the bit width of a type (for choosing the wider type).
         let int_width = |ty: TypeRef| -> u32 {

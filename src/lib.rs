@@ -123,19 +123,15 @@ impl CodegenBackend for CCodegenBackend {
             }
         }
 
-        // Remove SIMD features the C codegen cannot handle.
-        // During bootstrap (RUSTC_STAGE is set), exclude ALL SIMD features
-        // including ABI-required ones like neon, because the compiler's own
-        // dependencies (memchr via fluent-syntax) use #[cfg(target_feature)]
-        // to select SIMD paths that codegen_c translates incorrectly.
-        // Outside bootstrap, keep ABI-required features (e.g. neon on
-        // aarch64) since they are baseline and crates like ring assert
-        // their presence at compile time.
-        let is_bootstrap = std::env::var_os("RUSTC_STAGE").is_some();
+        // Remove ALL SIMD features the C codegen cannot handle.
+        // The C backend cannot correctly translate SIMD intrinsics, so
+        // we strip all SIMD features unconditionally to force crates
+        // (memchr, blake3, etc.) to use their scalar fallback paths.
+        // This also ensures the generated C source doesn't reference
+        // architecture-specific SIMD functions, keeping it portable
+        // across ISAs with the same pointer width.
         for &simd in SIMD_FEATURES {
-            if is_bootstrap || !abi.required.contains(&simd) {
-                base_features.remove(simd);
-            }
+            base_features.remove(simd);
         }
 
         let (target_features, unstable_target_features) =

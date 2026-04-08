@@ -59,7 +59,7 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
         self.intern_value(CValueKind::UintConst(i), ty)
     }
     fn const_usize(&self, i: u64) -> ValueRef {
-        let ty = self.type_isize();
+        let ty = self.type_usize();
         self.intern_value(CValueKind::UintConst(i as u128), ty)
     }
     fn const_uint(&self, t: TypeRef, i: u64) -> ValueRef {
@@ -363,7 +363,11 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
                 let ptr_bytes = init.inspect_with_uninit_and_ptr_outside_interpreter(
                     reloc_off..(reloc_off + pointer_size),
                 );
-                let ptr_offset = u64::from_le_bytes(ptr_bytes.try_into().unwrap_or([0u8; 8]));
+                let ptr_offset = match pointer_size {
+                    4 => u32::from_le_bytes(ptr_bytes.try_into().unwrap_or([0u8; 4])) as u64,
+                    8 => u64::from_le_bytes(ptr_bytes.try_into().unwrap_or([0u8; 8])),
+                    _ => panic!("unsupported pointer size: {pointer_size}"),
+                };
                 let target = match self.tcx.global_alloc(prov.alloc_id()) {
                     interpret::GlobalAlloc::Function { instance, .. } => {
                         let sym = self.tcx.symbol_name(instance).name.to_string();
@@ -437,7 +441,7 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
             }
 
             let decl = format!(
-                "static const struct {{ {fields} }} __attribute__((packed, aligned({pointer_size}))) {name} = {{ {inits} }};",
+                "static const struct {{ {fields} }} __attribute__((packed, aligned(sizeof(void *)))) {name} = {{ {inits} }};",
                 fields = fields.join(" "),
                 inits = inits.join(", "),
             );
@@ -495,7 +499,7 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
             let has_relocs = !provenance.ptrs().is_empty();
             let alloc_len = init.len();
 
-            // Use the allocation's actual alignment (not just pointer_size).
+            // Use the allocation's actual alignment (not just pointer size).
             // Types with #[repr(align(N))] need N-byte alignment.
             let actual_align = init.align.bytes().max(pointer_size as u64);
             if alloc_len == 0 {
@@ -538,7 +542,11 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
                     let ptr_bytes = init.inspect_with_uninit_and_ptr_outside_interpreter(
                         reloc_off..(reloc_off + pointer_size),
                     );
-                    let ptr_offset = u64::from_le_bytes(ptr_bytes.try_into().unwrap_or([0u8; 8]));
+                    let ptr_offset = match pointer_size {
+                        4 => u32::from_le_bytes(ptr_bytes.try_into().unwrap_or([0u8; 4])) as u64,
+                        8 => u64::from_le_bytes(ptr_bytes.try_into().unwrap_or([0u8; 8])),
+                        _ => panic!("unsupported pointer size: {pointer_size}"),
+                    };
                     let target = match self.tcx.global_alloc(prov.alloc_id()) {
                         interpret::GlobalAlloc::Function { instance, .. } => {
                             let sym = self.tcx.symbol_name(instance).name.to_string();
@@ -655,7 +663,7 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
             decl
         };
 
-        // #[used] / #[used(compiler)] — prevent linker GC from discarding.
+        // #[used] / #[used(compiler)] -- prevent linker GC from discarding.
         use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
         let decl = if attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
             || attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER)
