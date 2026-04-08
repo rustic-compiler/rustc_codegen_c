@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  MAX_FAIL_PERCENT: 1
+  BOOTSTRAP_TOML: |
+    profile = "dist"
+
+    [rust]
+    codegen-backends = ["c"]
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        cc: [gcc, clang]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout rust
+        uses: actions/checkout@v6
+        with:
+          repository: rustic-compiler/rust
+          ref: rustic-1.94.1
+          path: rust
+
+      - name: Checkout rustc_codegen_c
+        uses: actions/checkout@v6
+        with:
+          path: rustc_codegen_c
+
+      - name: Create symlink
+        run: cd rust/compiler && ln -s ../../rustc_codegen_c rustc_codegen_c
+
+      - name: Configure
+        run: |
+          echo "$BOOTSTRAP_TOML" > rust/bootstrap.toml
+          echo "CC=${{ matrix.cc }}" >> "$GITHUB_ENV"
+          echo "HOST_TUPLE=$(rustc --print=host-tuple)" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: cd rust && ./compiler/rustc_codegen_c/test.sh
+
+      - name: Build
+        run: cd rust && ./x build compiler library
+
+      - name: Create tarball
+        run: |
+          cd rust/build/host/stage2
+          tar czf "$GITHUB_WORKSPACE/rustic-$HOST_TUPLE-${{ matrix.cc }}.tar.gz" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustic-${{ env.HOST_TUPLE }}-${{ matrix.cc }}
+          path: rustic-${{ env.HOST_TUPLE }}-${{ matrix.cc }}.tar.gz
