@@ -88,10 +88,9 @@ fn emit_unwind_infrastructure(module: &mut CModule) {
     // __rustc_unwind_chain is extern-declared in the preamble; its single
     // definition with default visibility lives here so that all codegen
     // units (including those in libstd.so) share one TLS slot.
-    module.function_defs.push(
-        "__attribute__((visibility(\"default\"))) __thread struct __rustc_unwind_context *__rustc_unwind_chain;\n"
-            .to_string(),
-    );
+    module
+        .function_defs
+        .push("_Thread_local struct __rustc_unwind_context *__rustc_unwind_chain;\n".to_string());
 
     // _Unwind_RaiseException is now emitted as a weak definition in every
     // module's preamble (see preamble.c), so we don't emit it here.

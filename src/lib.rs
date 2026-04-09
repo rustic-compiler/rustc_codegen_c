@@ -195,7 +195,7 @@ impl CodegenBackend for CCodegenBackend {
         outputs: &OutputFilenames,
     ) {
         // Emit the final Makefile with complete dependency info.
-        write::emit_final_makefile(sess, &codegen_results, outputs);
+        write::emit_final_makefile(&codegen_results, outputs);
 
         // The C backend's setjmp/longjmp unwind mechanism requires that
         // __rustc_unwind_chain (TLS), _Unwind_RaiseException, and __rust_try

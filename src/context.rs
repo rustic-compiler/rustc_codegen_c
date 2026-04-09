@@ -132,7 +132,7 @@ impl<'tcx> CodegenCx<'tcx> {
     pub fn emit_extern_static_decl(&self, c_name: &str, original_name: &str, def_id: DefId) {
         let is_weak = self.is_extern_weak(def_id);
         let tls = if self.tcx.is_thread_local_static(def_id) {
-            "__thread "
+            "_Thread_local "
         } else {
             ""
         };
@@ -140,7 +140,7 @@ impl<'tcx> CodegenCx<'tcx> {
         if is_weak {
             self.module.borrow_mut().add_global_decl(
                 c_name,
-                format!("__attribute__((weak)) void {c_name}(void){asm};"),
+                format!("#pragma weak {c_name}\nvoid {c_name}(void){asm};"),
             );
             return;
         }
@@ -221,7 +221,7 @@ impl<'tcx> CodegenCx<'tcx> {
             return;
         }
         module.struct_defs.push(format!(
-            "struct {struct_name} {{ {fields_str} }} __attribute__((packed, aligned(sizeof(void *))));"
+            "#pragma pack(push, 1)\nstruct {struct_name} {{ {fields_str} }};\n#pragma pack(pop)"
         ));
         let asm = Self::asm_label(original_name, c_name);
         module.add_global_decl(

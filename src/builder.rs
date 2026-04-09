@@ -699,10 +699,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         lhs: ValueRef,
         rhs: ValueRef,
     ) -> (ValueRef, ValueRef) {
-        // Use GCC/Clang __builtin_*_overflow.
-        // The value type now carries the correct signedness (e.g. uint32_t
-        // for u32, int32_t for i32), so __builtin_*_overflow detects the
-        // right kind of overflow based on the output type directly.
+        // Use portable overflow detection helpers from preamble.
         let val_ty = self.cx.values.borrow().get_type(lhs);
         let result = self.cx.new_temp(val_ty);
         let result_name = self.cx.render_value(result);
@@ -717,11 +714,33 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
 
         let l = self.cx.render_value(lhs);
         let r = self.cx.render_value(rhs);
-        let builtin = match oop {
-            OverflowOp::Add => "__builtin_add_overflow",
-            OverflowOp::Sub => "__builtin_sub_overflow",
-            OverflowOp::Mul => "__builtin_mul_overflow",
+
+        // Determine the type-specific helper suffix
+        let suffix = {
+            let types = self.cx.types.borrow();
+            match types.get(val_ty) {
+                CTypeKind::Int { bits, signed } => {
+                    let c_bits = match bits {
+                        0..=8 => 8,
+                        9..=16 => 16,
+                        17..=32 => 32,
+                        33..=64 => 64,
+                        _ => 128,
+                    };
+                    format!("{}{c_bits}", if *signed { "i" } else { "u" })
+                }
+                CTypeKind::PtrWidth { signed } => {
+                    format!("{}size", if *signed { "i" } else { "u" })
+                }
+                _ => "u64".to_string(),
+            }
         };
+        let op_name = match oop {
+            OverflowOp::Add => "add",
+            OverflowOp::Sub => "sub",
+            OverflowOp::Mul => "mul",
+        };
+        let helper = format!("__rustc_{op_name}_overflow_{suffix}");
 
         let bool_ty = self.cx.intern_type(CTypeKind::Bool);
         let overflow = self.cx.new_temp(bool_ty);
@@ -737,7 +756,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         self.emit(CStmt::assign(
             CExpr::var(&overflow_name),
             CExpr::call(
-                CExpr::var(builtin),
+                CExpr::var(&helper),
                 vec![
                     CExpr::var(l),
                     CExpr::var(r),
@@ -936,7 +955,9 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let t = self.cx.render_type(ty);
         if size.bytes() > 8 {
             // 128-bit atomics: use __sync_val_compare_and_swap to avoid
-            // libatomic dependency (__atomic_load_16).
+            // libatomic dependency (__atomic_load_16).  C11 atomics for
+            // types >8 bytes require linking libatomic; __sync builtins
+            // compile to inline instructions without the dependency.
             self.new_temp_with_stmt(
                 ty,
                 CExpr::call(
@@ -1139,7 +1160,10 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let ty = self.cx.values.borrow().get_type(val);
         let t = self.cx.render_type(ty);
         if size.bytes() > 8 {
-            // 128-bit atomics: use CAS loop to avoid libatomic dependency.
+            // 128-bit atomics: use __sync CAS loop to avoid libatomic
+            // dependency.  C11 atomics for types >8 bytes require
+            // linking libatomic; __sync builtins compile to inline
+            // instructions without the dependency.
             let old = self.cx.new_temp(ty);
             let old_name = self.cx.render_value(old);
             {

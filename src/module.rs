@@ -32,7 +32,8 @@ pub struct FunctionDef {
     pub block_counter: u32,
     /// Declarations of local temporary variables (type, name).
     pub local_decls: Vec<String>,
-    /// Linkage prefix for this function (e.g., "static ", "__attribute__((weak)) ").
+    /// Linkage prefix for this function (e.g., "static ", "").
+    /// Weak linkage is handled via #pragma weak before the function definition.
     pub linkage_prefix: String,
     /// Whether this function uses indirect return (codegen_ssa passes out
     /// pointer as first arg, but our C signature doesn't include it).
@@ -51,6 +52,8 @@ pub struct FunctionDef {
     pub param_type_overrides: BTreeMap<usize, String>,
     /// Whether this function is C-variadic.
     pub is_variadic: bool,
+    /// Whether this function has weak linkage (emitted via #pragma weak).
+    pub is_weak: bool,
     /// Parameter indices that are passed by value on the stack
     /// (PassMode::Indirect { on_stack: true }).  `get_param` must take
     /// the address of these to produce the pointer that codegen_ssa expects.
@@ -66,13 +69,14 @@ impl FunctionDef {
             blocks: BTreeMap::new(),
             block_counter: 0,
             local_decls: Vec::new(),
-            linkage_prefix: "__attribute__((weak)) ".to_string(),
+            linkage_prefix: String::new(),
             has_indirect_ret: false,
             ret_data_type: None,
             retbuf_name: None,
             invoke_counter: 0,
             param_type_overrides: BTreeMap::new(),
             is_variadic: false,
+            is_weak: true,
             on_stack_params: std::collections::BTreeSet::new(),
         }
     }
@@ -110,6 +114,12 @@ impl FunctionDef {
     /// Render the function definition as C code.
     pub fn render(&self, types: &TypeStore) -> String {
         let mut s = String::new();
+
+        // Emit #pragma weak before the function definition if needed.
+        // Static (internal linkage) functions cannot be weak.
+        if self.is_weak && !self.linkage_prefix.contains("static") {
+            let _ = writeln!(s, "#pragma weak {}", self.name);
+        }
 
         // Signature
         let params_str: Vec<_> = self

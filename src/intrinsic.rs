@@ -30,18 +30,17 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
         match name {
             sym::black_box => {
                 args[0].val.store(self, result_dest);
-                // Emit an inline asm optimization barrier so the C compiler
-                // treats the stored value as observable.  Without this, the
-                // compiler may eliminate the store and any preceding stack
-                // allocations that feed it.
+                // Use C11 atomic_signal_fence as a portable optimization
+                // barrier so the C compiler treats the stored value as
+                // observable.
                 if !result_dest.layout.is_zst() {
                     let ptr = self.cx.render_value(result_dest.val.llval);
                     self.emit(CStmt::raw(format!(
-                        "__asm__ volatile(\"\" : : \"r\"({ptr}) : \"memory\");"
+                        "atomic_signal_fence(memory_order_acq_rel); (void){ptr};"
                     )));
                 } else {
                     self.emit(CStmt::raw(
-                        "__asm__ volatile(\"\" : : : \"memory\");".to_string(),
+                        "atomic_signal_fence(memory_order_acq_rel);".to_string(),
                     ));
                 }
                 Ok(())
@@ -341,16 +340,10 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
 
     fn assume(&mut self, _val: ValueRef) {}
 
-    fn expect(&mut self, cond: ValueRef, expected: bool) -> ValueRef {
-        let c = self.cx.render_value(cond);
-        let bool_ty = self.cx.intern_type(CTypeKind::Bool);
-        self.new_temp_with_stmt(
-            bool_ty,
-            CExpr::call(
-                CExpr::var("__builtin_expect"),
-                vec![CExpr::var(&c), CExpr::lit(if expected { "1" } else { "0" })],
-            ),
-        )
+    fn expect(&mut self, cond: ValueRef, _expected: bool) -> ValueRef {
+        // __builtin_expect is just an optimization hint with no C11 equivalent.
+        // Return the condition as-is; the branch prediction hint is dropped.
+        cond
     }
 
     fn type_checked_load(
@@ -545,22 +538,18 @@ fn codegen_ctlz<'a, 'tcx>(
     let ty = bx.cx.values.borrow().get_type(val);
     let bits = bx.cx.int_width(ty);
     let ret_ty = bx.cx.type_i32();
-    // For sub-32-bit signed types, casting to (unsigned int) sign-extends
-    // (e.g. (unsigned int)(-1i8) == 0xFFFFFFFF). Mask to the correct width.
     let expr = if bits < 32 {
         let mask = (1u64 << bits) - 1;
-        format!(
-            "({v} == 0 ? {bits} : __builtin_clz((unsigned int)({v}) & {mask}U) - (32 - {bits}))"
-        )
+        format!("({v} == 0 ? {bits} : __rustc_clz32((uint32_t)({v}) & {mask}U) - (32 - {bits}))")
     } else if bits <= 32 {
-        format!("({v} == 0 ? {bits} : __builtin_clz((unsigned int){v}) - (32 - {bits}))")
+        format!("({v} == 0 ? {bits} : __rustc_clz32((uint32_t){v}) - (32 - {bits}))")
     } else if bits <= 64 {
-        format!("({v} == 0 ? {bits} : __builtin_clzll((unsigned long long){v}) - (64 - {bits}))")
+        format!("({v} == 0 ? {bits} : __rustc_clz64((uint64_t){v}) - (64 - {bits}))")
     } else {
         format!(
-            "((unsigned long long)((unsigned __int128)({v}) >> 64) != 0 \
-                 ? __builtin_clzll((unsigned long long)((unsigned __int128)({v}) >> 64)) \
-                 : 64 + ((unsigned long long)({v}) == 0 ? 64 : __builtin_clzll((unsigned long long)({v}))))"
+            "((uint64_t)((uint128_t)({v}) >> 64) != 0 \
+                 ? __rustc_clz64((uint64_t)((uint128_t)({v}) >> 64)) \
+                 : 64 + ((uint64_t)({v}) == 0 ? 64 : __rustc_clz64((uint64_t)({v}))))"
         )
     };
     let result = bx.new_temp_with_stmt(ret_ty, CExpr::raw(expr));
@@ -579,14 +568,14 @@ fn codegen_cttz<'a, 'tcx>(
     let bits = bx.cx.int_width(ty);
     let ret_ty = bx.cx.type_i32();
     let expr = if bits <= 32 {
-        format!("({v} == 0 ? {bits} : __builtin_ctz((unsigned int){v}))")
+        format!("({v} == 0 ? {bits} : __rustc_ctz32((uint32_t){v}))")
     } else if bits <= 64 {
-        format!("({v} == 0 ? {bits} : __builtin_ctzll((unsigned long long){v}))")
+        format!("({v} == 0 ? {bits} : __rustc_ctz64((uint64_t){v}))")
     } else {
         format!(
-            "((unsigned long long)({v}) != 0 \
-                 ? __builtin_ctzll((unsigned long long)({v})) \
-                 : 64 + ((unsigned long long)((unsigned __int128)({v}) >> 64) == 0 ? 64 : __builtin_ctzll((unsigned long long)((unsigned __int128)({v}) >> 64))))"
+            "((uint64_t)({v}) != 0 \
+                 ? __rustc_ctz64((uint64_t)({v})) \
+                 : 64 + ((uint64_t)((uint128_t)({v}) >> 64) == 0 ? 64 : __rustc_ctz64((uint64_t)((uint128_t)({v}) >> 64))))"
         )
     };
     let result = bx.new_temp_with_stmt(ret_ty, CExpr::raw(expr));
@@ -604,19 +593,16 @@ fn codegen_ctpop<'a, 'tcx>(
     let ty = bx.cx.values.borrow().get_type(val);
     let bits = bx.cx.int_width(ty);
     let ret_ty = bx.cx.type_i32();
-    // For sub-32-bit signed types, casting to (unsigned int) sign-extends
-    // (e.g. (unsigned int)(-1i8) == 0xFFFFFFFF, popcount 32 instead of 8).
-    // Mask to the correct width first.
     let expr = if bits < 32 {
         let mask = (1u64 << bits) - 1;
-        format!("__builtin_popcount((unsigned int)({v}) & {mask}U)")
-    } else if bits == 32 {
-        format!("__builtin_popcount((unsigned int){v})")
+        format!("__rustc_popcount32((uint32_t)({v}) & {mask}U)")
+    } else if bits <= 32 {
+        format!("__rustc_popcount32((uint32_t){v})")
     } else if bits <= 64 {
-        format!("__builtin_popcountll((unsigned long long){v})")
+        format!("__rustc_popcount64((uint64_t){v})")
     } else {
         format!(
-            "(__builtin_popcountll((unsigned long long)({v})) + __builtin_popcountll((unsigned long long)((unsigned __int128)({v}) >> 64)))"
+            "(__rustc_popcount64((uint64_t)({v})) + __rustc_popcount64((uint64_t)((uint128_t)({v}) >> 64)))"
         )
     };
     let result = bx.new_temp_with_stmt(ret_ty, CExpr::raw(expr));
@@ -635,12 +621,12 @@ fn codegen_bswap<'a, 'tcx>(
     let bits = bx.cx.int_width(ty);
     let expr = match bits {
         8 => v.clone(),
-        16 => format!("__builtin_bswap16({v})"),
-        32 => format!("__builtin_bswap32({v})"),
-        64 => format!("__builtin_bswap64({v})"),
+        16 => format!("__rustc_bswap16({v})"),
+        32 => format!("__rustc_bswap32({v})"),
+        64 => format!("__rustc_bswap64({v})"),
         128 => format!(
-            "((unsigned __int128)__builtin_bswap64((uint64_t)({v})) << 64 | \
-             (unsigned __int128)__builtin_bswap64((uint64_t)((unsigned __int128)({v}) >> 64)))"
+            "((uint128_t)__rustc_bswap64((uint64_t)({v})) << 64 | \
+             (uint128_t)__rustc_bswap64((uint64_t)((uint128_t)({v}) >> 64)))"
         ),
         _ => format!("{v} /* bswap unsupported for {bits}-bit */"),
     };
@@ -712,15 +698,36 @@ fn codegen_saturating<'a, 'tcx>(
             func.add_local_decl(format!("{t} {overflow_name};"));
         }
     }
-    let builtin = if name == sym::saturating_add {
-        "__builtin_add_overflow"
-    } else {
-        "__builtin_sub_overflow"
-    };
     let is_signed = matches!(
         bx.cx.types.borrow().get(ty),
         CTypeKind::Int { signed: true, .. } | CTypeKind::PtrWidth { signed: true }
     );
+    // Determine the type-specific helper suffix
+    let suffix = {
+        let types = bx.cx.types.borrow();
+        match types.get(ty) {
+            CTypeKind::Int { bits, signed } => {
+                let c_bits = match bits {
+                    0..=8 => 8,
+                    9..=16 => 16,
+                    17..=32 => 32,
+                    33..=64 => 64,
+                    _ => 128,
+                };
+                format!("{}{c_bits}", if *signed { "i" } else { "u" })
+            }
+            CTypeKind::PtrWidth { signed } => {
+                format!("{}size", if *signed { "i" } else { "u" })
+            }
+            _ => "u64".to_string(),
+        }
+    };
+    let op_name = if name == sym::saturating_add {
+        "add"
+    } else {
+        "sub"
+    };
+    let helper = format!("__rustc_{op_name}_overflow_{suffix}");
     let clamp = if is_signed {
         let (min_val, max_val) = if bits <= 64 {
             let max = (1i128 << (bits - 1)) - 1;
@@ -754,7 +761,7 @@ fn codegen_saturating<'a, 'tcx>(
         }
     };
     bx.emit(CStmt::raw(format!(
-        "{overflow_name} = {builtin}({l}, {r}, &{result_name});"
+        "{overflow_name} = {helper}({l}, {r}, &{result_name});"
     )));
     bx.emit(CStmt::raw(format!(
         "if ({overflow_name}) {result_name} = {clamp};"
@@ -842,7 +849,7 @@ fn codegen_simd_extract<'a, 'tcx>(
             _ => ret_ty,
         }
     };
-    let result = bx.new_temp_with_stmt(elem_ty, CExpr::index(CExpr::var(&v), CExpr::var(&i)));
+    let result = bx.new_temp_with_stmt(elem_ty, CExpr::raw(format!("{v}.v[{i}]")));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -867,7 +874,29 @@ fn codegen_simd_cmp<'a, 'tcx>(
         _ => unreachable!(),
     };
     let a_ty = bx.cx.values.borrow().get_type(a);
-    let result = bx.new_temp_with_stmt(a_ty, CExpr::raw(format!("{va} {c_op} {vb}")));
+    let vec_len = {
+        let types = bx.cx.types.borrow();
+        match types.get(a_ty) {
+            CTypeKind::Vector { len, .. } => *len as usize,
+            _ => 1usize,
+        }
+    };
+    // SIMD comparison returns -1 (all bits set) for true, 0 for false
+    let ret_ty = bx.cx.backend_type(result_dest.layout);
+    let result = bx.cx.new_temp(ret_ty);
+    let rn = bx.cx.render_value(result);
+    let result_decl = bx.cx.render_type_decl(ret_ty, &rn);
+    {
+        let mut module = bx.cx.module.borrow_mut();
+        if let Some(func) = module.open_functions.get_mut(&bx.current_fn) {
+            func.add_local_decl(format!("{result_decl};"));
+        }
+    }
+    for i in 0..vec_len {
+        bx.emit(CStmt::raw(format!(
+            "{rn}.v[{i}] = ({va}.v[{i}] {c_op} {vb}.v[{i}]) ? -1 : 0;"
+        )));
+    }
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -889,7 +918,28 @@ fn codegen_simd_bitwise<'a, 'tcx>(
         _ => unreachable!(),
     };
     let a_ty = bx.cx.values.borrow().get_type(a);
-    let result = bx.new_temp_with_stmt(a_ty, CExpr::raw(format!("{va} {c_op} {vb}")));
+    let vec_len = {
+        let types = bx.cx.types.borrow();
+        match types.get(a_ty) {
+            CTypeKind::Vector { len, .. } => *len as usize,
+            _ => 1usize,
+        }
+    };
+    let result = bx.cx.new_temp(a_ty);
+    let rn = bx.cx.render_value(result);
+    let result_decl = bx.cx.render_type_decl(a_ty, &rn);
+    {
+        let mut module = bx.cx.module.borrow_mut();
+        if let Some(func) = module.open_functions.get_mut(&bx.current_fn) {
+            func.add_local_decl(format!("{result_decl};"));
+        }
+    }
+    for i in 0..vec_len {
+        bx.emit(CStmt::assign(
+            CExpr::raw(format!("{rn}.v[{i}]")),
+            CExpr::raw(format!("{va}.v[{i}] {c_op} {vb}.v[{i}]")),
+        ));
+    }
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -906,7 +956,28 @@ fn codegen_simd_shift<'a, 'tcx>(
     let vb = bx.cx.render_value(b);
     let c_op = if name == sym::simd_shl { "<<" } else { ">>" };
     let a_ty = bx.cx.values.borrow().get_type(a);
-    let result = bx.new_temp_with_stmt(a_ty, CExpr::raw(format!("{va} {c_op} {vb}")));
+    let vec_len = {
+        let types = bx.cx.types.borrow();
+        match types.get(a_ty) {
+            CTypeKind::Vector { len, .. } => *len as usize,
+            _ => 1usize,
+        }
+    };
+    let result = bx.cx.new_temp(a_ty);
+    let rn = bx.cx.render_value(result);
+    let result_decl = bx.cx.render_type_decl(a_ty, &rn);
+    {
+        let mut module = bx.cx.module.borrow_mut();
+        if let Some(func) = module.open_functions.get_mut(&bx.current_fn) {
+            func.add_local_decl(format!("{result_decl};"));
+        }
+    }
+    for i in 0..vec_len {
+        bx.emit(CStmt::assign(
+            CExpr::raw(format!("{rn}.v[{i}]")),
+            CExpr::raw(format!("{va}.v[{i}] {c_op} {vb}.v[{i}]")),
+        ));
+    }
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -926,7 +997,7 @@ fn codegen_simd_insert<'a, 'tcx>(
     let result = bx.new_temp_with_stmt(vec_ty, CExpr::raw(v));
     let rn = bx.cx.render_value(result);
     bx.emit(CStmt::assign(
-        CExpr::index(CExpr::var(&rn), CExpr::var(&i)),
+        CExpr::raw(format!("{rn}.v[{i}]")),
         CExpr::var(&e),
     ));
     bx.store(result, result_dest.val.llval, result_dest.val.align);
@@ -942,14 +1013,32 @@ fn codegen_simd_cast<'a, 'tcx>(
     let va = bx.cx.render_value(a);
     let ret_layout = result_dest.layout;
     let ret_ty = bx.cx.backend_type(ret_layout);
-    let ret_t = bx.cx.render_type(ret_ty);
-    let result = bx.new_temp_with_stmt(
-        ret_ty,
-        CExpr::call(
-            CExpr::var("__builtin_convertvector"),
-            vec![CExpr::var(&va), CExpr::raw(ret_t)],
-        ),
-    );
+
+    let (out_elem_ty, out_len) = {
+        let types = bx.cx.types.borrow();
+        match types.get(ret_ty) {
+            CTypeKind::Vector { element, len } => (*element, *len as usize),
+            _ => (ret_ty, 1usize),
+        }
+    };
+    let out_elem_t = bx.cx.render_type(out_elem_ty);
+
+    let result = bx.cx.new_temp(ret_ty);
+    let rn = bx.cx.render_value(result);
+    let result_decl = bx.cx.render_type_decl(ret_ty, &rn);
+    {
+        let mut module = bx.cx.module.borrow_mut();
+        if let Some(func) = module.open_functions.get_mut(&bx.current_fn) {
+            func.add_local_decl(format!("{result_decl};"));
+        }
+    }
+    // Element-wise cast
+    for i in 0..out_len {
+        bx.emit(CStmt::assign(
+            CExpr::raw(format!("{rn}.v[{i}]")),
+            CExpr::raw(format!("({out_elem_t}){va}.v[{i}]")),
+        ));
+    }
     bx.store(result, result_dest.val.llval, result_dest.val.align);
     Ok(())
 }
@@ -995,10 +1084,10 @@ fn codegen_simd_shuffle<'a, 'tcx>(
         }
     }
     bx.emit(CStmt::raw(format!(
-        "memcpy(&{arr_name}[0], &{v1}, {in_len} * sizeof({elem_t}));"
+        "memcpy(&{arr_name}[0], &{v1}.v[0], {in_len} * sizeof({elem_t}));"
     )));
     bx.emit(CStmt::raw(format!(
-        "memcpy(&{arr_name}[{in_len}], &{v2}, {in_len} * sizeof({elem_t}));"
+        "memcpy(&{arr_name}[{in_len}], &{v2}.v[0], {in_len} * sizeof({elem_t}));"
     )));
 
     let index_vals: Vec<u64> = {
@@ -1023,7 +1112,7 @@ fn codegen_simd_shuffle<'a, 'tcx>(
     }
     for (i, &idx_val) in index_vals.iter().enumerate() {
         bx.emit(CStmt::assign(
-            CExpr::index(CExpr::var(&rn), CExpr::lit(&i.to_string())),
+            CExpr::raw(format!("{rn}.v[{i}]")),
             CExpr::index(CExpr::var(&arr_name), CExpr::lit(&idx_val.to_string())),
         ));
     }

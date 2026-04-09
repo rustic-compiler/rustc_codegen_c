@@ -139,26 +139,34 @@ impl TypeStore {
     pub fn render_struct_defs(&self) -> Vec<String> {
         let mut defs = Vec::new();
         for (i, kind) in self.types.iter().enumerate() {
-            if let CTypeKind::Struct {
-                fields,
-                packed,
-                name: None,
-            } = kind
-            {
-                let fields_str: Vec<_> = fields
-                    .iter()
-                    .enumerate()
-                    .map(|(j, f)| format!("  {};", self.render_decl(*f, &format!("f{j}"))))
-                    .collect();
-                let packed_attr = if *packed {
-                    "__attribute__((packed)) "
-                } else {
-                    ""
-                };
-                defs.push(format!(
-                    "struct {packed_attr}_S{i} {{\n{}\n}};",
-                    fields_str.join("\n")
-                ));
+            match kind {
+                CTypeKind::Struct {
+                    fields,
+                    packed,
+                    name: None,
+                } => {
+                    let fields_str: Vec<_> = fields
+                        .iter()
+                        .enumerate()
+                        .map(|(j, f)| format!("  {};", self.render_decl(*f, &format!("f{j}"))))
+                        .collect();
+                    if *packed {
+                        defs.push(format!(
+                            "#pragma pack(push, 1)\nstruct _S{i} {{\n{}\n}};\n#pragma pack(pop)",
+                            fields_str.join("\n")
+                        ));
+                    } else {
+                        defs.push(format!("struct _S{i} {{\n{}\n}};", fields_str.join("\n")));
+                    }
+                }
+                CTypeKind::Vector { element, len } => {
+                    let elem_str = match self.get(*element) {
+                        CTypeKind::Ptr | CTypeKind::PtrWidth { .. } => "uintptr_t".to_string(),
+                        _ => self.render(*element),
+                    };
+                    defs.push(format!("typedef struct {{ {elem_str} v[{len}]; }} _V{i};"));
+                }
+                _ => {}
             }
         }
         defs
@@ -221,15 +229,9 @@ impl TypeStore {
                 }
                 format!("{} (*)({})", self.render(*ret), args_joined)
             }
-            CTypeKind::Vector { element, len } => {
-                // GCC vector extension.
-                // GCC doesn't allow pointer types as vector elements;
-                // use uintptr_t (same size) instead.
-                let elem_str = match self.get(*element) {
-                    CTypeKind::Ptr | CTypeKind::PtrWidth { .. } => "uintptr_t".to_string(),
-                    _ => self.render(*element),
-                };
-                format!("{elem_str} __attribute__((vector_size({len} * sizeof({elem_str}))))")
+            CTypeKind::Vector { .. } => {
+                // Struct-based SIMD vector type (defined in render_struct_defs).
+                format!("_V{}", ty.0)
             }
             CTypeKind::PtrWidth { signed } => {
                 if *signed {

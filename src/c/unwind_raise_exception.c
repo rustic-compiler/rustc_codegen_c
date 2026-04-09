@@ -1,4 +1,3 @@
-__attribute__((visibility("hidden")))
 int _Unwind_RaiseException(void *exception_object) {
   if (__rustc_unwind_chain) {
     __rustc_unwind_chain->exception_ptr = exception_object;

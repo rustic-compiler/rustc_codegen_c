@@ -486,7 +486,7 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
             }
 
             let decl = format!(
-                "static const struct {{ {fields} }} __attribute__((packed, aligned(sizeof(void *)))) {name} = {{ {inits} }};",
+                "#pragma pack(push, 1)\nstatic const struct {{ {fields} }} {name} = {{ {inits} }};\n#pragma pack(pop)",
                 fields = fields.join(" "),
                 inits = inits.join(", "),
             );
@@ -531,7 +531,7 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
         let asm = Self::asm_label(&sym, &c_name);
 
         let tls = if self.tcx.is_thread_local_static(def_id) {
-            "__thread "
+            "_Thread_local "
         } else {
             ""
         };
@@ -693,6 +693,9 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
         // Add link_section attribute if specified (e.g. .init_array for
         // pre-main constructors).
         let attrs = self.tcx.codegen_fn_attrs(def_id);
+        // Section placement: no C11 equivalent exists.
+        // Keep __attribute__((section(...))) as it is essential for correct
+        // behavior (e.g., .init_array for pre-main constructors).
         let decl = if let Some(section) = attrs.link_section {
             let sect = section.as_str();
             format!("__attribute__((section(\"{sect}\"))) {decl}")
@@ -703,12 +706,14 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
         // Add alignment attribute if the static has a specified alignment
         // override (e.g. #[rustc_align_static(N)]).
         let decl = if let Some(align) = attrs.alignment {
-            format!("__attribute__((aligned({}))) {decl}", align.bytes())
+            format!("_Alignas({}) {decl}", align.bytes())
         } else {
             decl
         };
 
         // #[used] / #[used(compiler)] -- prevent linker GC from discarding.
+        // No C11 equivalent exists; keep __attribute__((used)) as it is
+        // essential for correct linker behavior.
         use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
         let decl = if attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
             || attrs.flags.contains(CodegenFnAttrFlags::USED_COMPILER)

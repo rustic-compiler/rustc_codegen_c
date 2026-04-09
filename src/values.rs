@@ -179,7 +179,8 @@ impl ValueStore {
             }
             CValueKind::VectorConst { elements, type_str } => {
                 let elts: Vec<_> = elements.iter().map(|e| self.render(*e)).collect();
-                format!("({type_str}){{ {} }}", elts.join(", "))
+                // Struct-based vector: ({type}){{ .v = { e1, e2, ... } }}
+                format!("({type_str}){{ .v = {{ {} }} }}", elts.join(", "))
             }
             CValueKind::ByteString { id, .. } => format!("_bytes{id}"),
             CValueKind::StringLiteral { id, .. } => format!("_str{id}"),

@@ -8,125 +8,29 @@ void abort(void);
 
 /* ===== PSM fallbacks ===== */
 
-__attribute__((weak)) void *rust_psm_stack_pointer(void) {
-  void *sp;
-#if defined(__aarch64__)
-  __asm__ volatile("mov %0, sp" : "=r"(sp));
-#elif defined(__x86_64__)
-  __asm__ volatile("lea 8(%%rsp), %0" : "=r"(sp));
-#elif defined(__i386__)
-  __asm__ volatile("lea 4(%%esp), %0" : "=r"(sp));
-#elif defined(__arm__)
-  __asm__ volatile("mov %0, sp" : "=r"(sp));
-#elif defined(__riscv)
-  __asm__ volatile("mv %0, sp" : "=r"(sp));
-#else
-  volatile char anchor; sp = (void *)&anchor;
-#endif
-  return sp;
+/* No C11-portable way to get the stack pointer. Use the address of a
+ * local variable as a portable approximation. */
+#pragma weak rust_psm_stack_pointer
+void *rust_psm_stack_pointer(void) {
+  volatile char anchor;
+  return (void *)&anchor;
 }
 
-__attribute__((weak)) uint8_t rust_psm_stack_direction(void) {
+#pragma weak rust_psm_stack_direction
+uint8_t rust_psm_stack_direction(void) {
   return 2; /* DESCENDING */
 }
 
-/* on_stack / replace_stack need precise stack control -> global asm. */
-
-#if defined(__aarch64__)
-/* ---- aarch64 (AAPCS64) ---- */
-# ifdef __APPLE__
-#  define PSM_FN(n)  ".globl _" n "\n.weak_definition _" n "\n_" n ":\n"
-#  define PSM_END(n) ""
-# else
-#  define PSM_FN(n)  ".globl " n "\n.weak " n "\n.type " n ",%function\n" n ":\n"
-#  define PSM_END(n) ".size " n ",.-" n "\n"
-# endif
-__asm__(
-  PSM_FN("rust_psm_on_stack")
-  "stp x29,x30,[sp,#-16]!\n"
-  "mov x29,sp\n"
-  "mov sp,x3\n"       /* x3 = new_sp */
-  "blr x2\n"          /* x2 = callback(x0=data, x1=ret_ptr) */
-  "mov sp,x29\n"
-  "ldp x29,x30,[sp],#16\n"
-  "ret\n"
-  PSM_END("rust_psm_on_stack")
-);
-__asm__(
-  PSM_FN("rust_psm_replace_stack")
-  "mov sp,x2\n"       /* x2 = new_sp */
-  "br  x1\n"          /* x1 = callback(x0=data), never returns */
-  PSM_END("rust_psm_replace_stack")
-);
-# undef PSM_FN
-# undef PSM_END
-
-#elif defined(__x86_64__) && !defined(_WIN32)
-/* ---- x86-64 System V ---- */
-# ifdef __APPLE__
-#  define PSM_FN(n)  ".globl _" n "\n.weak_definition _" n "\n_" n ":\n"
-#  define PSM_END(n) ""
-# else
-#  define PSM_FN(n)  ".globl " n "\n.weak " n "\n.type " n ",@function\n" n ":\n"
-#  define PSM_END(n) ".size " n ",.-" n "\n"
-# endif
-__asm__(
-  PSM_FN("rust_psm_on_stack")
-  "push %rbp\n"
-  "mov  %rsp,%rbp\n"
-  "mov  %rcx,%rsp\n"  /* rcx = new_sp */
-  "call *%rdx\n"      /* rdx = callback(rdi=data, rsi=ret_ptr) */
-  "mov  %rbp,%rsp\n"
-  "pop  %rbp\n"
-  "ret\n"
-  PSM_END("rust_psm_on_stack")
-);
-__asm__(
-  PSM_FN("rust_psm_replace_stack")
-  "lea  -8(%rdx),%rsp\n"  /* rdx = new_sp */
-  "jmp  *%rsi\n"           /* rsi = callback(rdi=data) */
-  PSM_END("rust_psm_replace_stack")
-);
-# undef PSM_FN
-# undef PSM_END
-
-#elif defined(__i386__) && !defined(_WIN32)
-/* ---- i386 fastcall ---- */
-# define PSM_FN(n)  ".globl " n "\n.weak " n "\n.type " n ",@function\n" n ":\n"
-# define PSM_END(n) ".size " n ",.-" n "\n"
-__asm__(
-  PSM_FN("rust_psm_on_stack")
-  "push %ebp\n"
-  "mov  %esp,%ebp\n"
-  "mov  12(%ebp),%esp\n"  /* new_sp */
-  "call *8(%ebp)\n"       /* callback(ecx=data, edx=ret_ptr) */
-  "mov  %ebp,%esp\n"
-  "pop  %ebp\n"
-  "ret  $8\n"
-  PSM_END("rust_psm_on_stack")
-);
-__asm__(
-  PSM_FN("rust_psm_replace_stack")
-  "mov  4(%esp),%esp\n"   /* new_sp */
-  "call *%edx\n"          /* callback(ecx=data) */
-  "ud2\n"
-  PSM_END("rust_psm_replace_stack")
-);
-# undef PSM_FN
-# undef PSM_END
-
-#else
-/* ---- Generic (no stack switching) ---- */
-__attribute__((weak))
+/* Generic (no stack switching) -- C has no portable way to switch stacks. */
+#pragma weak rust_psm_on_stack
 void rust_psm_on_stack(uintptr_t data, uintptr_t ret_ptr,
                         void (*cb)(uintptr_t, uintptr_t), void *sp) {
   (void)sp; cb(data, ret_ptr);
 }
-__attribute__((weak))
+#pragma weak rust_psm_replace_stack
 void rust_psm_replace_stack(uintptr_t data, void (*cb)(uintptr_t), void *sp) {
   (void)sp; cb(data); abort();
 }
-#endif /* PSM arch */
 
 /* ===== BLAKE3 portable implementation ===== */
 
@@ -206,20 +110,23 @@ static void b3_compress_xof(const uint32_t cv[8],const uint8_t blk[64],
 /* ===== BLAKE3 weak wrappers ===== */
 
 #define B3_HASH_MANY(name) \
-  __attribute__((weak)) void name( \
+  __attribute__((weak)) \
+  void name( \
       const uint8_t*const*inputs,size_t ni,size_t nblk, \
       const uint32_t key[8],uint64_t ctr,bool inc, \
       uint8_t fl,uint8_t fs,uint8_t fe,uint8_t*out){ \
     b3_hash_many(inputs,ni,nblk,key,ctr,inc,fl,fs,fe,out);}
 
 #define B3_COMPRESS_IP(name) \
-  __attribute__((weak)) void name( \
+  __attribute__((weak)) \
+  void name( \
       uint32_t cv[8],const uint8_t blk[64], \
       uint8_t blen,uint64_t ctr,uint8_t fl){ \
     b3_compress_ip(cv,blk,blen,ctr,fl);}
 
 #define B3_COMPRESS_XOF(name) \
-  __attribute__((weak)) void name( \
+  __attribute__((weak)) \
+  void name( \
       const uint32_t cv[8],const uint8_t blk[64], \
       uint8_t blen,uint64_t ctr,uint8_t fl,uint8_t out[64]){ \
     b3_compress_xof(cv,blk,blen,ctr,fl,out);}

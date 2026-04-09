@@ -145,16 +145,32 @@ impl<'tcx> AsmCodegenMethods<'tcx> for CodegenCx<'tcx> {
                 full_asm.push_str("\n.att_syntax\n");
             }
 
-            // Escape for C string literal and emit as __asm__()
+            // Global assembly: no C11 equivalent exists. Keep __asm__()
+            // as it is essential for correct Rust semantics (e.g., symbol
+            // definitions referenced by Rust code).
+            //
+            // Wrap in an architecture preprocessor guard so the generated C
+            // compiles on any host (e.g. x86_64 asm won't break an aarch64
+            // compiler during cross-compilation).
             let escaped = full_asm
                 .lines()
                 .map(|line| line.replace('\\', "\\\\").replace('"', "\\\""))
                 .collect::<Vec<_>>()
                 .join("\\n\"\n\"");
+            let asm_block = format!("__asm__(\n\"{escaped}\\n\"\n);\n");
+            // Wrap in an architecture preprocessor guard derived from
+            // the target arch name.  Most C compilers predefine
+            // __<archname>__ (e.g. __x86_64__, __aarch64__).
+            // "x86" is the sole exception: GCC/Clang use __i386__.
+            let arch_name = self.tcx.sess.target.arch.to_string();
+            let cpp_macro = match arch_name.as_str() {
+                "x86" => "__i386__".to_string(),
+                other => format!("__{other}__"),
+            };
             self.module
                 .borrow_mut()
                 .function_defs
-                .push(format!("__asm__(\n\"{escaped}\\n\"\n);\n"));
+                .push(format!("#if defined({cpp_macro})\n{asm_block}#endif\n"));
             return;
         }
 

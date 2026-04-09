@@ -417,7 +417,7 @@ impl PrettyPrinter {
                 self.dedent();
                 self.line("}");
             }
-            CStmt::Unreachable => self.line("__builtin_unreachable();"),
+            CStmt::Unreachable => self.line("abort();"),
             CStmt::DoWhile { body, cond } => {
                 self.line("do {");
                 self.indent();
