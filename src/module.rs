@@ -51,6 +51,10 @@ pub struct FunctionDef {
     pub param_type_overrides: BTreeMap<usize, String>,
     /// Whether this function is C-variadic.
     pub is_variadic: bool,
+    /// Parameter indices that are passed by value on the stack
+    /// (PassMode::Indirect { on_stack: true }).  `get_param` must take
+    /// the address of these to produce the pointer that codegen_ssa expects.
+    pub on_stack_params: std::collections::BTreeSet<usize>,
 }
 
 impl FunctionDef {
@@ -69,6 +73,7 @@ impl FunctionDef {
             invoke_counter: 0,
             param_type_overrides: BTreeMap::new(),
             is_variadic: false,
+            on_stack_params: std::collections::BTreeSet::new(),
         }
     }
 

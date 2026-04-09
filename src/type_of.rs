@@ -236,11 +236,9 @@ pub(crate) fn fn_abi_ret_type<'tcx>(
         PassMode::Direct(_) | PassMode::Pair(_, _) => layout_to_c_type(cx, fn_abi.ret.layout),
         PassMode::Cast { ref cast, .. } => cast_target_to_c_type(cx, cast),
         PassMode::Indirect { .. } => {
-            // Use the actual layout type for ALL ABIs.  The C compiler
-            // handles sret natively (e.g. via x8 on aarch64).  This
-            // ensures ABI compatibility when function pointers are
-            // transmuted between Rust and C ABIs (as in proc_macro
-            // bridge's Closure).
+            // Return the struct by value; the C compiler handles sret
+            // natively via the platform convention (x8 on aarch64,
+            // hidden first param on x86_64).
             layout_to_c_type(cx, fn_abi.ret.layout)
         }
     }
@@ -256,6 +254,10 @@ pub(crate) fn fn_abi_arg_type<'tcx>(cx: &CodegenCx<'tcx>, arg: &ArgAbi<'tcx, Ty<
             layout_to_c_type(cx, arg.layout)
         }
         PassMode::Cast { ref cast, .. } => cast_target_to_c_type(cx, cast),
+        // on_stack means the ABI requires the data on the stack (byval).
+        // Declare the C parameter as the struct type so the C compiler
+        // reads it from the stack, matching what LLVM's byval produces.
+        PassMode::Indirect { on_stack: true, .. } => layout_to_c_type(cx, arg.layout),
         PassMode::Indirect { .. } => cx.intern_type(CTypeKind::Ptr),
     }
 }
@@ -269,10 +271,8 @@ pub(crate) fn fn_abi_to_c_type<'tcx>(
 
     let mut args = Vec::new();
 
-    // No explicit sret parameter for ANY ABI.  The C compiler handles
-    // sret natively via the platform convention.  This ensures ABI
-    // compatibility when function pointers are transmuted between Rust
-    // and C ABIs (as in proc_macro bridge's Closure).
+    // No explicit sret parameter: the C compiler handles sret
+    // natively via the platform convention.
 
     for arg in fn_abi.args.iter() {
         match arg.mode {

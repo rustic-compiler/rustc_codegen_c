@@ -34,8 +34,11 @@ pub enum CValueKind {
     Function { name: String, sig: TypeRef },
     /// A struct constant with element values.
     StructConst { fields: Vec<ValueRef> },
-    /// A vector/array constant.
-    VectorConst { elements: Vec<ValueRef> },
+    /// A vector/array constant (rendered as a compound literal).
+    VectorConst {
+        elements: Vec<ValueRef>,
+        type_str: String,
+    },
     /// A byte string constant (for `static_addr_of`).
     ByteString { data: Vec<u8>, id: u32 },
     /// A string literal: (data_ptr, len).
@@ -174,9 +177,9 @@ impl ValueStore {
                 let elts: Vec<_> = fields.iter().map(|f| self.render(*f)).collect();
                 format!("{{ {} }}", elts.join(", "))
             }
-            CValueKind::VectorConst { elements } => {
+            CValueKind::VectorConst { elements, type_str } => {
                 let elts: Vec<_> = elements.iter().map(|e| self.render(*e)).collect();
-                format!("{{ {} }}", elts.join(", "))
+                format!("({type_str}){{ {} }}", elts.join(", "))
             }
             CValueKind::ByteString { id, .. } => format!("_bytes{id}"),
             CValueKind::StringLiteral { id, .. } => format!("_str{id}"),

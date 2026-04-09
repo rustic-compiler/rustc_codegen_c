@@ -502,6 +502,7 @@ impl<'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx> {
 
         let mut param_types: Vec<(TypeRef, String)> = Vec::new();
         let mut arg_idx = 0usize;
+        let mut on_stack_params = std::collections::BTreeSet::new();
 
         // No explicit sret parameter -- the C compiler handles sret
         // natively for ALL ABIs.  codegen_ssa still passes a sret pointer
@@ -536,6 +537,16 @@ impl<'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx> {
                     param_types.push((ptr_ty, format!("_arg{arg_idx}")));
                     arg_idx += 1;
                     param_types.push((ptr_ty, format!("_arg{arg_idx}")));
+                    arg_idx += 1;
+                }
+                rustc_target::callconv::PassMode::Indirect {
+                    on_stack: true,
+                    meta_attrs: None,
+                    ..
+                } => {
+                    let ty = crate::type_of::fn_abi_arg_type(self, arg);
+                    on_stack_params.insert(arg_idx);
+                    param_types.push((ty, format!("_arg{arg_idx}")));
                     arg_idx += 1;
                 }
                 _ => {
@@ -586,6 +597,7 @@ impl<'tcx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx> {
         let mut func_def = CModule::new_function_def(c_name.clone(), ret_ty, param_types);
         func_def.linkage_prefix = linkage_prefix.to_string();
         func_def.is_variadic = is_variadic;
+        func_def.on_stack_params = on_stack_params;
         let is_indirect = matches!(
             fn_abi.ret.mode,
             rustc_target::callconv::PassMode::Indirect { .. }

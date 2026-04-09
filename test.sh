@@ -3,7 +3,7 @@ set -euo pipefail
 
 : "${MAX_FAIL_PERCENT:=1}"
 
-./x test ui 2>&1 | tee test_output.txt || true
+./x test --stage=2 ui 2>&1 | tee test_output.txt || true
 
 LINE=$(tail test_output.txt | grep -P '\d+ passed; \d+ failed; \d+ ignored;' | tail -1)
 PASSED=$(echo "$LINE" | grep -oP '\d+(?= passed)')

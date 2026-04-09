@@ -990,7 +990,7 @@ fn codegen_simd_shuffle<'a, 'tcx>(
     let index_vals: Vec<u64> = {
         let vals = bx.cx.values.borrow();
         match &vals.get(indices).kind {
-            CValueKind::VectorConst { elements } => elements
+            CValueKind::VectorConst { elements, .. } => elements
                 .iter()
                 .map(|e| vals.as_u64(*e).unwrap_or(0))
                 .collect(),

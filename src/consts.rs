@@ -164,9 +164,11 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
             element: elem_ty,
             len: elts.len() as u64,
         });
+        let type_str = self.render_type(ty);
         self.intern_value(
             CValueKind::VectorConst {
                 elements: elts.to_vec(),
+                type_str,
             },
             ty,
         )

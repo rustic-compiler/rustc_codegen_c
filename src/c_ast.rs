@@ -103,8 +103,8 @@ pub enum CExpr {
     Sizeof(Box<CExpr>),
     /// `sizeof(type)`
     SizeofType(String),
-    /// Initializer list: `{ e1, e2, ... }`
-    InitList(Vec<CExpr>),
+    /// Compound literal: `(type){ e1, e2, ... }`
+    CompoundLiteral(String, Vec<CExpr>),
     /// Parenthesized expression: `(expr)`
     Paren(Box<CExpr>),
     /// Raw C expression string (fallback for complex cases).
@@ -202,8 +202,8 @@ impl fmt::Display for CExpr {
             }
             Self::Sizeof(expr) => write!(f, "sizeof({expr})"),
             Self::SizeofType(ty) => write!(f, "sizeof({ty})"),
-            Self::InitList(elts) => {
-                write!(f, "{{ ")?;
+            Self::CompoundLiteral(ty, elts) => {
+                write!(f, "({ty}){{ ")?;
                 for (i, elt) in elts.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;

@@ -863,6 +863,31 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 let ptr_to_fnptr = self.cx.render_type_decl(ty, "*");
                 self.new_temp_with_stmt(ty, CExpr::deref(ptr_to_fnptr, CExpr::var(&p)))
             }
+            CTypeKind::Int { bits: 128, .. } => {
+                // Rust's u128/i128 has 8-byte alignment, but C's __int128
+                // has 16-byte alignment. GCC/Clang may emit aligned SIMD
+                // instructions (e.g. movdqa) for direct dereferences, causing
+                // SIGSEGV when the pointer is only 8-byte aligned. Use memcpy
+                // to avoid alignment assumptions.
+                let result = self.cx.new_temp(ty);
+                let result_name = self.cx.render_value(result);
+                let t = self.cx.render_type(ty);
+                {
+                    let mut module = self.cx.module.borrow_mut();
+                    if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
+                        func.add_local_decl(format!("{t} {result_name};"));
+                    }
+                }
+                self.emit(CStmt::expr(CExpr::call(
+                    CExpr::var("memcpy"),
+                    vec![
+                        CExpr::addr_of(CExpr::var(&result_name)),
+                        CExpr::var(&p),
+                        CExpr::sizeof_expr(CExpr::var(&result_name)),
+                    ],
+                )));
+                result
+            }
             _ => {
                 let t = self.cx.render_type(ty);
                 self.new_temp_with_stmt(ty, CExpr::deref(format!("{t} *"), CExpr::var(&p)))
@@ -873,7 +898,31 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
     fn volatile_load(&mut self, ty: TypeRef, ptr: ValueRef) -> ValueRef {
         let p = self.cx.render_value(ptr);
         let t = self.cx.render_type(ty);
-        self.new_temp_with_stmt(ty, CExpr::deref(format!("volatile {t} *"), CExpr::var(&p)))
+        let is_i128 = matches!(
+            self.cx.types.borrow().get(ty),
+            CTypeKind::Int { bits: 128, .. }
+        );
+        if is_i128 {
+            // Use volatile read + memcpy to avoid alignment issues.
+            let result = self.cx.new_temp(ty);
+            let result_name = self.cx.render_value(result);
+            {
+                let mut module = self.cx.module.borrow_mut();
+                if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
+                    func.add_local_decl(format!("{t} {result_name};"));
+                }
+            }
+            // Read via volatile char pointer to preserve volatile semantics
+            // while avoiding 16-byte alignment requirement of __int128.
+            self.emit(CStmt::raw(format!(
+                "{{ volatile char *__src = (volatile char *){p}; \
+                   char *__dst = (char *)&{result_name}; \
+                   for (int __i = 0; __i < 16; __i++) __dst[__i] = __src[__i]; }}"
+            )));
+            result
+        } else {
+            self.new_temp_with_stmt(ty, CExpr::deref(format!("volatile {t} *"), CExpr::var(&p)))
+        }
     }
 
     fn atomic_load(
@@ -988,22 +1037,49 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let v = self.cx.render_value(val);
         let p = self.cx.render_value(ptr);
         let ty = self.cx.values.borrow().get_type(val);
-        let is_array = matches!(self.cx.types.borrow().get(ty), CTypeKind::Array { .. });
-        if is_array {
-            self.emit(CStmt::expr(CExpr::call(
-                CExpr::var("memcpy"),
-                vec![
-                    CExpr::var(&p),
-                    CExpr::addr_of(CExpr::var(&v)),
-                    CExpr::sizeof_expr(CExpr::var(&v)),
-                ],
-            )));
-        } else {
-            let t = self.cx.render_type(ty);
-            self.emit(CStmt::assign(
-                CExpr::deref(format!("{t} *"), CExpr::var(&p)),
-                CExpr::var(&v),
-            ));
+        let type_kind = self.cx.types.borrow().get(ty).clone();
+        match &type_kind {
+            CTypeKind::Array { .. } => {
+                self.emit(CStmt::expr(CExpr::call(
+                    CExpr::var("memcpy"),
+                    vec![
+                        CExpr::var(&p),
+                        CExpr::addr_of(CExpr::var(&v)),
+                        CExpr::sizeof_expr(CExpr::var(&v)),
+                    ],
+                )));
+            }
+            CTypeKind::Int { bits: 128, .. } => {
+                // Use memcpy to avoid alignment mismatch between Rust's
+                // u128/i128 (align 8) and C's __int128 (align 16).
+                // Store to a local first so we have an addressable lvalue
+                // (literal constants like 0LL are not lvalues in C).
+                let t = self.cx.render_type(ty);
+                let src_tmp = self.cx.new_temp(ty);
+                let src_name = self.cx.render_value(src_tmp);
+                {
+                    let mut module = self.cx.module.borrow_mut();
+                    if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
+                        func.add_local_decl(format!("{t} {src_name};"));
+                    }
+                }
+                self.emit(CStmt::assign(CExpr::var(&src_name), CExpr::var(&v)));
+                self.emit(CStmt::expr(CExpr::call(
+                    CExpr::var("memcpy"),
+                    vec![
+                        CExpr::var(&p),
+                        CExpr::addr_of(CExpr::var(&src_name)),
+                        CExpr::lit(format!("{}", 128 / 8)),
+                    ],
+                )));
+            }
+            _ => {
+                let t = self.cx.render_type(ty);
+                self.emit(CStmt::assign(
+                    CExpr::deref(format!("{t} *"), CExpr::var(&p)),
+                    CExpr::var(&v),
+                ));
+            }
         }
         val
     }
@@ -1594,10 +1670,14 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             element: elem_ty,
             len: num_elts as u64,
         });
+        let vec_ty_str = self.cx.render_type(vec_ty);
         let e = self.cx.render_value(elt);
         self.new_temp_with_stmt(
             vec_ty,
-            CExpr::InitList((0..num_elts).map(|_| CExpr::var(e.clone())).collect()),
+            CExpr::CompoundLiteral(
+                vec_ty_str,
+                (0..num_elts).map(|_| CExpr::var(e.clone())).collect(),
+            ),
         )
     }
 
@@ -2027,7 +2107,23 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             .enumerate()
             .map(|(i, &a)| {
                 if let Some(&pty) = param_types.get(i) {
-                    self.coerce_ptr_int(a, pty)
+                    // Detect on_stack (byval) params: the C signature
+                    // declares a struct type, but codegen_ssa passes a
+                    // pointer.  Dereference to pass by value.
+                    let is_struct_param =
+                        matches!(self.cx.types.borrow().get(pty), CTypeKind::Struct { .. });
+                    let val_ty = self.cx.values.borrow().get_type(a);
+                    let is_ptr_value = matches!(self.cx.types.borrow().get(val_ty), CTypeKind::Ptr);
+                    if is_struct_param && is_ptr_value {
+                        let ptr_str = self.cx.render_value(a);
+                        let ty_str = self.cx.render_type(pty);
+                        self.cx.intern_value(
+                            CValueKind::InlineExpr(format!("*({ty_str} *){ptr_str}")),
+                            pty,
+                        )
+                    } else {
+                        self.coerce_ptr_int(a, pty)
+                    }
                 } else {
                     a
                 }
@@ -2370,14 +2466,31 @@ impl<'a, 'tcx> AbiBuilderMethods for Builder<'a, 'tcx> {
             // sret parameter, so subtract 1 to get the correct C
             // parameter index.
             let c_index = if has_indirect_ret { index - 1 } else { index };
-            let param_ty = {
+            let is_on_stack = {
                 let module = self.cx.module.borrow();
-                let func = module.open_functions.get(&self.current_fn);
-                func.and_then(|f| f.params.get(c_index).map(|(ty, _)| *ty))
-                    .unwrap_or(self.cx.type_ptr())
+                module
+                    .open_functions
+                    .get(&self.current_fn)
+                    .map_or(false, |f| f.on_stack_params.contains(&c_index))
             };
-            self.cx
-                .intern_value(CValueKind::Param { index: c_index }, param_ty)
+            if is_on_stack {
+                // on_stack params are declared as struct types (by value)
+                // in the C signature to match the byval ABI.  codegen_ssa
+                // expects a pointer, so take the address of the param.
+                self.cx.intern_value(
+                    CValueKind::InlineExpr(format!("(void *)&_arg{c_index}")),
+                    self.cx.type_ptr(),
+                )
+            } else {
+                let param_ty = {
+                    let module = self.cx.module.borrow();
+                    let func = module.open_functions.get(&self.current_fn);
+                    func.and_then(|f| f.params.get(c_index).map(|(ty, _)| *ty))
+                        .unwrap_or(self.cx.type_ptr())
+                };
+                self.cx
+                    .intern_value(CValueKind::Param { index: c_index }, param_ty)
+            }
         }
     }
 }
