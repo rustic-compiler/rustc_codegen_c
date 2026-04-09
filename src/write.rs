@@ -55,7 +55,11 @@ pub(crate) fn codegen(
         // backend may generate patterns that trip the canary
         // without actual corruption (e.g. aggregate stores)
         .arg("-ffunction-sections") // put each function in its own section so --gc-sections
-        .arg("-fdata-sections"); // can strip unreachable code/data at link time
+        .arg("-fdata-sections") // can strip unreachable code/data at link time
+        .arg("-fno-optimize-sibling-calls"); // disable tail call elimination -- Rust does not
+    // guarantee TCO; clang at -O1 aggressively converts
+    // recursion to loops, preventing stack overflow
+    // detection (e.g. tests/ui/runtime/out-of-stack.rs)
 
     // -fPIC: skip for MSVC-like compilers where it's not applicable
     let cc_lower = cc.to_lowercase();

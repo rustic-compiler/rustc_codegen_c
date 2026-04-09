@@ -1009,6 +1009,39 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         dest: PlaceRef<'tcx, ValueRef>,
     ) {
         let stride = dest.layout.field(self.cx(), 0).size;
+
+        // For large repeat counts, emit memset (1-byte elements) or a C
+        // for-loop instead of unrolling into individual stores.  Without
+        // this, `[val; 125_001]` would generate 375 K lines of C and hang
+        // the C compiler's optimizer.
+        const UNROLL_LIMIT: u64 = 16;
+        if count > UNROLL_LIMIT && stride.bytes() > 0 {
+            let d = self.cx.render_value(dest.val.llval);
+
+            if stride.bytes() == 1 {
+                // memset for single-byte elements
+                let val = elem.immediate();
+                let v = self.cx.render_value(val);
+                self.emit(CStmt::raw(format!("memset({d}, (int){v}, {count}ULL);")));
+                return;
+            }
+
+            // Store first element normally, then memcpy it to the rest
+            // inside a for-loop.
+            let dest_place = PlaceRef {
+                val: PlaceValue::new_sized(dest.val.llval, dest.layout.align.abi),
+                layout: dest.layout.field(self.cx(), 0),
+            };
+            elem.val.store(self, dest_place);
+            let sb = stride.bytes();
+            self.emit(CStmt::raw(format!(
+                "for (uint64_t _rep = 1; _rep < {count}ULL; _rep++) {{ \
+                 memcpy((void *)((uintptr_t){d} + _rep * {sb}ULL), \
+                 (void *){d}, {sb}ULL); }}"
+            )));
+            return;
+        }
+
         for i in 0..count {
             let offset = stride * i;
             let dest_ptr = if offset.bytes() > 0 {

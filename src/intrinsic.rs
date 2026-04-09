@@ -30,6 +30,20 @@ impl<'a, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'tcx> {
         match name {
             sym::black_box => {
                 args[0].val.store(self, result_dest);
+                // Emit an inline asm optimization barrier so the C compiler
+                // treats the stored value as observable.  Without this, the
+                // compiler may eliminate the store and any preceding stack
+                // allocations that feed it.
+                if !result_dest.layout.is_zst() {
+                    let ptr = self.cx.render_value(result_dest.val.llval);
+                    self.emit(CStmt::raw(format!(
+                        "__asm__ volatile(\"\" : : \"r\"({ptr}) : \"memory\");"
+                    )));
+                } else {
+                    self.emit(CStmt::raw(
+                        "__asm__ volatile(\"\" : : : \"memory\");".to_string(),
+                    ));
+                }
                 Ok(())
             }
             sym::volatile_load | sym::unaligned_volatile_load => {
