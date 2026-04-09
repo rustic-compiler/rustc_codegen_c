@@ -16,6 +16,12 @@ system C compiler (e.g., `gcc` or `clang`) to produce object files.
 This enables Rust compilation for targets where an LLVM backend is unavailable
 but a C compiler exists.
 
+Related projects:
+
+- [rust-lang/rustc\_codegen\_c](https://github.com/rust-lang/rustc_codegen_c)
+- [FractalFir/rustc\_codegen\_clr](https://github.com/FractalFir/rustc_codegen_clr)
+- [thepowersgang/mrustc](https://github.com/thepowersgang/mrustc)
+
 ## Quick start
 
 ### Download compiler
