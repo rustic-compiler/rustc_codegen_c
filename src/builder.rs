@@ -2449,10 +2449,16 @@ impl<'a, 'tcx> AbiBuilderMethods for Builder<'a, 'tcx> {
                     .unwrap_or(self.cx.type_ptr())
             };
             let t = self.cx.render_type_decl(ret_ty, "_retbuf");
+            let natural_align = {
+                let store = self.cx.types.borrow();
+                let ptr_bytes = self.cx.tcx.data_layout.pointer_size().bytes();
+                store.natural_align_bytes(ret_ty, ptr_bytes)
+            };
+            let align = natural_align.max(16);
             {
                 let mut module = self.cx.module.borrow_mut();
                 if let Some(func) = module.open_functions.get_mut(&self.current_fn) {
-                    func.add_local_decl(format!("_Alignas(16) {t};"));
+                    func.add_local_decl(format!("_Alignas({align}) {t};"));
                     func.retbuf_name = Some("_retbuf".to_string());
                 }
             }

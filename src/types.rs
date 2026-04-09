@@ -93,6 +93,48 @@ impl TypeStore {
         &self.types[ty.0 as usize]
     }
 
+    /// Compute the minimum natural alignment (in bytes) that the C compiler
+    /// would assign to a type.  This is used to avoid emitting `_Alignas(N)`
+    /// with N smaller than the type's natural alignment, which Clang rejects.
+    pub fn natural_align_bytes(&self, ty: TypeRef, pointer_bytes: u64) -> u64 {
+        match self.get(ty) {
+            CTypeKind::Void => 1,
+            CTypeKind::Bool => 1,
+            CTypeKind::Int { bits, .. } => {
+                let c_bits = match bits {
+                    0..=8 => 8,
+                    9..=16 => 16,
+                    17..=32 => 32,
+                    33..=64 => 64,
+                    _ => 128,
+                };
+                (c_bits / 8).max(1)
+            }
+            CTypeKind::Float { bits } => (*bits as u64 / 8).max(1),
+            CTypeKind::Ptr | CTypeKind::PtrWidth { .. } => pointer_bytes,
+            CTypeKind::Array { element, .. } => self.natural_align_bytes(*element, pointer_bytes),
+            CTypeKind::Vector { element, len } => {
+                // GCC/Clang vector types have alignment equal to their total
+                // byte size (rounded up to the next power of two).
+                let elem_bytes = self.natural_align_bytes(*element, pointer_bytes);
+                let total = elem_bytes * len;
+                total.next_power_of_two()
+            }
+            CTypeKind::Struct { fields, packed, .. } => {
+                if *packed {
+                    1
+                } else {
+                    fields
+                        .iter()
+                        .map(|f| self.natural_align_bytes(*f, pointer_bytes))
+                        .max()
+                        .unwrap_or(1)
+                }
+            }
+            CTypeKind::Function { .. } => pointer_bytes,
+        }
+    }
+
     /// Render all unnamed struct type definitions for the C source preamble.
     pub fn render_struct_defs(&self) -> Vec<String> {
         let mut defs = Vec::new();
