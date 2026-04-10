@@ -55,7 +55,7 @@ pub enum CTypeKind {
         element: TypeRef,
         len: u64,
     },
-    /// Pointer-width integer (renders as intptr_t / uintptr_t).
+    /// Pointer-width integer (renders as __rustc_isize / __rustc_usize).
     /// Portable across architectures with the same or different pointer
     /// widths -- the C compiler picks the correct size.
     PtrWidth {
@@ -161,7 +161,7 @@ impl TypeStore {
                 }
                 CTypeKind::Vector { element, len } => {
                     let elem_str = match self.get(*element) {
-                        CTypeKind::Ptr | CTypeKind::PtrWidth { .. } => "uintptr_t".to_string(),
+                        CTypeKind::Ptr | CTypeKind::PtrWidth { .. } => "__rustc_usize".to_string(),
                         _ => self.render(*element),
                     };
                     defs.push(format!("typedef struct {{ {elem_str} v[{len}]; }} _V{i};"));
@@ -235,9 +235,9 @@ impl TypeStore {
             }
             CTypeKind::PtrWidth { signed } => {
                 if *signed {
-                    "intptr_t".into()
+                    "__rustc_isize".into()
                 } else {
-                    "uintptr_t".into()
+                    "__rustc_usize".into()
                 }
             }
         }

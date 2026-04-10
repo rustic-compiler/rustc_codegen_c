@@ -402,7 +402,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
                 let unsigned_ty = format!("uint{bits}_t");
                 CExpr::cast(unsigned_ty, CExpr::var(val))
             }
-            CTypeKind::PtrWidth { signed: true } => CExpr::cast("uintptr_t", CExpr::var(val)),
+            CTypeKind::PtrWidth { signed: true } => CExpr::cast("__rustc_usize", CExpr::var(val)),
             _ => CExpr::var(val),
         };
         drop(types);
@@ -1057,7 +1057,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             let sb = stride.bytes();
             self.emit(CStmt::raw(format!(
                 "for (uint64_t _rep = 1; _rep < {count}ULL; _rep++) {{ \
-                 memcpy((void *)((uintptr_t){d} + _rep * {sb}ULL), \
+                 memcpy((void *)((__rustc_usize){d} + _rep * {sb}ULL), \
                  (void *){d}, {sb}ULL); }}"
             )));
             return;
@@ -1207,11 +1207,11 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
         let idx0 = self.cx.render_value(indices[0]);
         let t = self.cx.render_type(ty);
 
-        let base = CExpr::cast("uintptr_t", CExpr::var(&p));
+        let base = CExpr::cast("__rustc_usize", CExpr::var(&p));
         let scaled_idx0 = CExpr::binop(
-            CExpr::cast("intptr_t", CExpr::paren(CExpr::var(&idx0))),
+            CExpr::cast("__rustc_isize", CExpr::paren(CExpr::var(&idx0))),
             CBinOp::Mul,
-            CExpr::cast("intptr_t", CExpr::sizeof_ty(&t)),
+            CExpr::cast("__rustc_isize", CExpr::sizeof_ty(&t)),
         );
 
         if indices.len() == 1 {
@@ -1222,7 +1222,7 @@ impl<'a, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx> {
             let sum = CExpr::binop(
                 CExpr::binop(base, CBinOp::Add, scaled_idx0),
                 CBinOp::Add,
-                CExpr::cast("intptr_t", CExpr::paren(CExpr::var(&idx1))),
+                CExpr::cast("__rustc_isize", CExpr::paren(CExpr::var(&idx1))),
             );
             self.new_temp_with_stmt(ptr_ty, CExpr::cast("void *", CExpr::paren(sum)))
         } else {

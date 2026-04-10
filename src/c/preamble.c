@@ -197,6 +197,18 @@ static inline _Bool __rustc_mul_overflow_i128(int128_t a, int128_t b, int128_t *
   return *r / a != b;
 }
 
+/* Pointer-width integer typedefs matching fixed-width types.
+   This avoids incompatible-pointer-types errors on targets where
+   uintptr_t is a different typedef than uint{32,64}_t (e.g. emscripten
+   where uintptr_t is 'unsigned long' but uint32_t is 'unsigned int'). */
+#if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFULL
+typedef uint64_t __rustc_usize;
+typedef int64_t  __rustc_isize;
+#else
+typedef uint32_t __rustc_usize;
+typedef int32_t  __rustc_isize;
+#endif
+
 /* Pointer-width overflow aliases */
 #if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFULL
 #define __rustc_add_overflow_usize __rustc_add_overflow_u64

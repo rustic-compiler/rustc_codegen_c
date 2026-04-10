@@ -193,16 +193,18 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
             InterpScalar::Int(int) => {
                 let data = int.to_bits(layout.size(self));
                 // When the C type is a pointer (e.g., BackendRepr::Scalar(Pointer)
-                // for types like Alignment), cast through uintptr_t to avoid
+                // for types like Alignment), cast through __rustc_usize to avoid
                 // -Wint-conversion and strict-aliasing UB in generated C code.
                 let is_ptr = matches!(self.types.borrow().get(llty), CTypeKind::Ptr);
                 if is_ptr {
                     let expr = if data <= u64::MAX as u128 {
-                        format!("(void *)(uintptr_t){data}ULL")
+                        format!("(void *)(__rustc_usize){data}ULL")
                     } else {
                         let lo = (data & u64::MAX as u128) as u64;
                         let hi = (data >> 64) as u64;
-                        format!("(void *)(uintptr_t)((unsigned __int128){hi}ULL << 64 | {lo}ULL)")
+                        format!(
+                            "(void *)(__rustc_usize)((unsigned __int128){hi}ULL << 64 | {lo}ULL)"
+                        )
                     };
                     self.intern_value(CValueKind::InlineExpr(expr), llty)
                 } else if matches!(layout.primitive(), rustc_abi::Primitive::Float(f) if f.size().bits() == 32)
@@ -313,7 +315,7 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
                         // The TypeId hash is encoded in the pointer offset.
                         // Drop the provenance and use the offset as the value,
                         // matching LLVM's ConstIntToPtr behavior.
-                        let expr = format!("(void *)(uintptr_t){offset_bytes}ULL");
+                        let expr = format!("(void *)(__rustc_usize){offset_bytes}ULL");
                         return self.intern_value(CValueKind::InlineExpr(expr), llty);
                     }
                 };
@@ -466,7 +468,7 @@ impl<'tcx> ConstCodegenMethods for CodegenCx<'tcx> {
                     }
                     interpret::GlobalAlloc::TypeId { .. } => {
                         // TypeId hash is encoded in the pointer offset
-                        format!("(void *)(uintptr_t){ptr_offset}ULL")
+                        format!("(void *)(__rustc_usize){ptr_offset}ULL")
                     }
                 };
                 fields.push(format!("  void *f{field_idx};"));
@@ -645,7 +647,7 @@ impl<'tcx> StaticCodegenMethods for CodegenCx<'tcx> {
                             }
                         }
                         interpret::GlobalAlloc::TypeId { .. } => {
-                            format!("(void *)(uintptr_t){ptr_offset}ULL")
+                            format!("(void *)(__rustc_usize){ptr_offset}ULL")
                         }
                     };
                     fields.push(format!("void *f{field_idx}"));
