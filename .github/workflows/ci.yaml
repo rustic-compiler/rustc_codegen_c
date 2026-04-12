@@ -46,6 +46,7 @@ jobs:
         with:
           repository: rustic-compiler/rust
           ref: ${{ env.RUST_BRANCH }}
+          fetch-depth: 0
           path: rust
 
       - name: Checkout rustc_codegen_c
