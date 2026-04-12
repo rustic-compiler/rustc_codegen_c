@@ -79,10 +79,6 @@ pub(crate) fn codegen(
     // -O0 causes SIGSEGV because generated C relies on optimizer
     // for stack temporary elimination.
     cmd.arg("-O1");
-    // Disable GCC's Conditional Constant Propagation pass which has
-    // O(n²) behaviour on functions with many setjmp calls (e.g.
-    // proc_macro::quote::quote has 2000+ invokes → 2000+ setjmps).
-    cmd.arg("-fno-tree-ccp");
 
     match cmd.output() {
         Ok(output) => {
@@ -243,8 +239,7 @@ fn generate_makefile(crate_name: &str, native_libs: &BTreeSet<String>) -> String
 CC ?= cc
 
 CFLAGS := -std=c11 -fwrapv -fno-strict-aliasing -funwind-tables \\
-          -fno-stack-protector -ffunction-sections -fdata-sections -fPIC -O1 \\
-          -fno-tree-ccp
+          -fno-stack-protector -ffunction-sections -fdata-sections -fPIC -O1
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
