@@ -16,6 +16,10 @@ system C compiler (e.g., `gcc` or `clang`) to produce object files.
 This enables Rust compilation for targets where an LLVM backend is unavailable
 but a C compiler exists.
 
+A Rust compiler built with `rustc_codegen_c` passes 99.2% of the `rustc` UI
+test suite (`./x test --stage=2 ui`), confirming that the backend preserves Rust semantics
+at the MIR level with high fidelity.
+
 Related projects:
 
 - [rust-lang/rustc\_codegen\_c](https://github.com/rust-lang/rustc_codegen_c)
@@ -44,12 +48,6 @@ cd rustic-rustc-csources
 make build
 ```
 
-## Compatibility
-
-A Rust compiler built with `rustc_codegen_c` passes 99.2% of the `rustc` UI
-test suite (`./x test ui`), confirming that the backend preserves Rust semantics
-at the MIR level with high fidelity.
-
 ## Build
 
 ```
@@ -72,7 +70,7 @@ codegen-backends = ["c"]
 EOF
 
 # Build rustc and std
-./x build --stage=2 compiler library
+./compiler/rustc_codegen_c/y build --stage=2 compiler library
 
 # Run
 rustup toolchain link rustic build/host/stage2

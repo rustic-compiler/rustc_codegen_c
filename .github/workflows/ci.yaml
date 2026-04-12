@@ -18,13 +18,13 @@ env:
   RUST_BRANCH: rustic-1.94.1
   MAX_FAIL_PERCENT: 1
   BOOTSTRAP_TOML: |
+    profile = "dist"
+
     [llvm]
     download-ci-llvm = true
 
     [rust]
     codegen-backends = ["c"]
-    llvm-tools = false
-    llvm-bitcode-linker = false
 
 jobs:
   build-test:
