@@ -64,7 +64,7 @@ jobs:
           echo "HOST_TUPLE=$(rustc --print=host-tuple)" >> "$GITHUB_ENV"
 
       - name: Test
-        run: cd rust && ./compiler/rustc_codegen_c/test.sh
+        run: cd rust && timeout 10800 ./compiler/rustc_codegen_c/test.sh
 
       - name: Build
         run: cd rust && ./x build compiler library
