@@ -19,12 +19,10 @@ env:
   MAX_FAIL_PERCENT: 1
   BOOTSTRAP_TOML: |
     profile = "dist"
-
-    [llvm]
-    download-ci-llvm = true
-
-    [rust]
-    codegen-backends = ["c"]
+    llvm.download-ci-llvm = true
+    rust.codegen-backends = ["c"]
+    build.extended = false
+    install.prefix = "./"
 
 jobs:
   build-test:
@@ -41,6 +39,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: true
+
       - name: Checkout rust
         uses: actions/checkout@v6
         with:
@@ -62,16 +68,17 @@ jobs:
           echo "$BOOTSTRAP_TOML" > rust/bootstrap.toml
           echo "CC=${{ matrix.cc }}" >> "$GITHUB_ENV"
           echo "HOST_TUPLE=$(rustc --print=host-tuple)" >> "$GITHUB_ENV"
+          echo "DESTDIR=./dist" >> "$GITHUB_ENV"
 
       - name: Test
         run: cd rust && timeout 10800 ./compiler/rustc_codegen_c/test.sh
 
-      - name: Build
-        run: cd rust && ./x build compiler library
+      - name: Install
+        run: cd rust && ./compiler/rustc_codegen_c/y install --stage=2 rustc library cargo
 
-      - name: Create stage2 tarball
+      - name: Create toolchain tarball
         run: |
-          cd rust/build/host/stage2
+          cd rust/dist
           tar czf "$GITHUB_WORKSPACE/rustic-toolchain-$HOST_TUPLE-${{ matrix.cc }}.tar.gz" .
       - name: Create csources tarball
         run: |
