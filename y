@@ -11,7 +11,7 @@ script_dir="$(cd "$(dirname "$0")"; pwd)"
 rust_dir="$(cd "$script_dir/../../"; pwd)"
 
 # Disable SIMD in build scripts unless SIMD_ENABLED is set.
-if [ "$SIMD_ENABLED" != "true" ]; then
+if [ "$SIMD_ENABLED" != "1" ]; then
     export CARGO_FEATURE_NO_NEON=1
     export CARGO_FEATURE_NO_AVX512=1
     export CARGO_FEATURE_NO_AVX2=1

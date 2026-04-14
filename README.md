@@ -28,7 +28,7 @@ Related projects:
 
 ## Quick start
 
-### Download compiler
+### Download the compiler
 
 ```
 # Donwload and link
@@ -48,7 +48,25 @@ cd rustic-rustc-csources
 make build
 ```
 
-## Build
+## Build your Rust program from C sources
+
+To transpile a Rust program into C and then build it from the generated C
+sources:
+
+```
+RUSTC_BOOTSTRAP=1 rustup run rustic cargo build --release -Z build-std
+cd target/release
+make build
+```
+
+## Known problems
+
+Some crates (e.g., `ring`) rely on CPU-specific extended instructions (such as
+Neon) and may fail to compile with the C backend. You may be able to
+work around this by changing the compilation target to one without those
+features.
+
+## Build the compiler
 
 ```
 # Clone repos

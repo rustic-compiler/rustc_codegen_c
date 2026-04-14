@@ -75,11 +75,12 @@ jobs:
         run: cd rust && timeout 10800 ./compiler/rustc_codegen_c/test.sh
 
       - name: Install
-        run: cd rust && ./compiler/rustc_codegen_c/y install --stage=2 rustc library cargo
+        run: cd rust && ./compiler/rustc_codegen_c/y install --stage=2 rustc library cargo src
 
       - name: Create toolchain tarball
         run: |
           cd rust/dist
+          rm -rf lib/libLLVM*
           tar czf "$GITHUB_WORKSPACE/rustic-toolchain-$HOST_TUPLE-${{ matrix.cc }}.tar.gz" .
       - name: Create csources tarball
         run: |
